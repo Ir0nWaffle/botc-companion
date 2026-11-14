@@ -1,0 +1,10 @@
+{
+  "name": "Clocktower Companion",
+  "short_name": "Clocktower",
+  "description": "A player's notebook for Blood on the Clocktower.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#13100E",
+  "theme_color": "#13100E",
+  "icons": [{ "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
