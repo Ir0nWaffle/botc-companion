@@ -5,7 +5,9 @@ const Engine = (() => {
   // Likelihood multipliers. A good player's info that turns out false is
   // possible (drunk / poisoned / Recluse / Spy), just unlikely.
   const NOISE = 0.15;          // a good source's info is false
+  const CLEAN_NOISE = 0.05;    // the same, on a script with nothing that causes drunkenness or poison
   const ST_NOISE = 0.02;       // a public / Storyteller fact is false
+  const DROISON_ROLES = ['drunk', 'poisoner', 'pukka', 'nodashii', 'sailor', 'innkeeper', 'courtier', 'goon', 'minstrel', 'philosopher', 'vigormortis', 'snakecharmer', 'sweetheart', 'widow', 'marionette'];
   const GUT = { '-2': 0.4, '-1': 0.7, '0': 1, '1': 1.4, '2': 2 };
 
   function charInfo(id, script) {
@@ -61,13 +63,12 @@ const Engine = (() => {
     const nm = (id) => names[id] || '?';
     const cname = (c) => charInfo(c, script).name;
 
-    // Source wrapper: evil sources may say anything; good ones are usually right.
-    function sourced(src, fn) {
-      if (src === 'st') return (w) => (fn(w) ? 1 : ST_NOISE);
-      const si = at(src);
-      if (si === undefined) return null;
-      return (w) => (w.evil[si] ? 1 : (fn(w) ? 1 : NOISE));
-    }
+    // When each player died, so facts about "the Demon" can respect a Demon that has since changed hands.
+    const deathRank = R.map(p => (p.dead && p.death && p.death.when ? phaseRank(p.death.when) : Infinity));
+    const demonGone = (w, when) => deathRank[w.demon] < phaseRank(when);
+    const otherEvilAlive = (w, i, rank) => { for (let k = 0; k < n; k++) if (k !== i && w.evil[k] && deathRank[k] > rank) return true; return false; };
+    // How likely a good player's whole set of info is unreliable (drunk or poisoned).
+    const droisonRate = DROISON_ROLES.some(has) ? NOISE : CLEAN_NOISE;
 
     // Claims
     const claims = R.map(p => claimOf(state, p));
@@ -94,13 +95,34 @@ const Engine = (() => {
         fn: (w) => (w.evil[i] || w.evil[j] ? 1 : f) });
     }
 
+    // Claim history and rule-breaking stories
+    R.forEach((p, i) => {
+      if (p.id === state.meId) return;
+      const history = (p.claims || []).map(c => c.char).filter((c, j, a) => j === 0 || c !== a[j - 1]);
+      if (history.length > 1) {
+        const f = ['barber', 'pithag', 'snakecharmer', 'philosopher', 'cerenovus'].some(has) ? 0.7 : 0.45;
+        factors.push({ kind: 'claim', label: `${p.name} changed their claim (${history.map(cname).join(' → ')})`, about: [p.id], fn: (w) => (w.evil[i] ? 1 : f) });
+      }
+      const claim = latestClaim(p);
+      if (!claim || !['townsfolk', 'outsider'].includes(charInfo(claim, script).team)) return;
+      const broken = bluffCheck({ ...state, meId: p.id, myChar: '', myAlign: 'good', bluff: { demonBluffs: [], plan: [] } }, script).issues.filter(x => x.rule && (x.level === 'bad' || x.level === 'warn'));
+      if (broken.length) {
+        const f = broken.some(x => x.level === 'bad') ? 0.3 : 0.55;
+        factors.push({ kind: 'claim', label: `${p.name}'s ${cname(claim)} story does not fit that role or the public events`, about: [p.id], fn: (w) => (w.evil[i] ? 1 : f) });
+      }
+    });
+
     // Deaths
     R.forEach((p, i) => {
       if (!p.dead || !p.death) return;
+      const rank = deathRank[i];
       if (p.death.how === 'night') {
-        factors.push({ kind: 'death', label: `${p.name} died at night (Demons rarely kill their own team)`, about: [p.id], fn: (w) => (w.evil[i] ? 0.4 : 1) });
+        factors.push({ kind: 'death', label: `${p.name} died at night (Demons rarely kill their own team)`, about: [p.id],
+          fn: (w) => (w.demon === i ? (has('imp') && otherEvilAlive(w, i, rank) ? 0.12 : 0.02) : w.evil[i] ? 0.4 : 1) });
       } else if (p.death.how === 'execution' && !state.gameOver) {
-        factors.push({ kind: 'death', label: `${p.name} was executed and the game went on`, about: [p.id], fn: (w) => (w.demon === i ? 0.2 : 1) });
+        const alive = R.filter((q, k) => deathRank[k] >= rank).length;
+        const carriesOn = (w) => has('zombuul') || has('mastermind') || (has('scarletwoman') && alive >= 5 && otherEvilAlive(w, i, rank));
+        factors.push({ kind: 'death', label: `${p.name} was executed and the game went on`, about: [p.id], fn: (w) => (w.demon === i ? (carriesOn(w) ? 0.25 : 0.03) : 1) });
       }
     });
 
@@ -113,6 +135,12 @@ const Engine = (() => {
     // Evidence
     const nomsByDay = {};
     (state.noms || []).forEach(nm => { (nomsByDay[nm.day] = nomsByDay[nm.day] || []).push(nm); });
+    const bySource = new Map();
+    const addItem = (src, label, about, lik) => {
+      if (!bySource.has(src)) bySource.set(src, []);
+      bySource.get(src).push({ label, about, lik });
+    };
+    const DEMON_FACTS = new Set(['clockmaker', 'ft', 'demonAmong', 'notDemon', 'demonVoted', 'minionNominated']);
 
     for (const ev of state.evidence || []) {
       const src = ev.source;
@@ -160,13 +188,10 @@ const Engine = (() => {
       } else if (t === 'ft' && ps.length) {
         if (!ev.yes) { holds = (w) => !ps.includes(w.demon); text = `no Demon among ${ev.players.map(nm).join(' & ')}`; }
         else {
-          const si = src === 'st' ? undefined : at(src);
-          factors.push({ kind: 'ev', ev: ev.id, label: `${srcName}: "yes" on ${ev.players.map(nm).join(' & ')} (${phaseLabel(ev.when)})`, about: [...ev.players, src].filter(x => x !== 'st'),
-            fn: (w) => {
-              if (si !== undefined && w.evil[si]) return 1;
-              if (ps.includes(w.demon)) return 1;
-              return ps.some(i => !w.evil[i]) ? 0.3 : NOISE;
-            } });
+          addItem(src, `"yes" on ${ev.players.map(nm).join(' & ')} (${phaseLabel(ev.when)})`, [...ev.players, src].filter(x => x !== 'st'), (w) => {
+            if (demonGone(w, ev.when) || ps.includes(w.demon)) return 1;
+            return ps.some(i => !w.evil[i]) ? 0.3 : NOISE; // a good player may be the red herring
+          });
           continue;
         }
       } else if (t === 'demonAmong' && ps.length) {
@@ -191,9 +216,33 @@ const Engine = (() => {
         text = `a Minion ${ev.yes ? 'nominated' : 'did not nominate'} on day ${ev.day}`;
       }
       if (!holds) continue;
-      const fn = sourced(src, holds);
-      if (!fn) continue;
-      factors.push({ kind: 'ev', ev: ev.id, label: `${srcName}: ${text} (${phaseLabel(ev.when)})`, about: [...(ev.players || []), src].filter(x => x && x !== 'st'), fn });
+      const base = holds;
+      const check = DEMON_FACTS.has(t) ? (w) => demonGone(w, ev.when) || base(w) : base;
+      const misregisters = ps.some(i => claims[i] === 'recluse'); // a Recluse can show up as evil
+      addItem(src, `${text} (${phaseLabel(ev.when)})`, [...(ev.players || []), src].filter(x => x && x !== 'st'),
+        (w) => (check(w) ? 1 : misregisters ? 0.35 : 0));
+    }
+
+    // A drunk or poisoned player is wrong about everything at once, so a source's info is weighed as one story.
+    for (const [src, items] of bySource) {
+      if (src === 'st') {
+        items.forEach(it => factors.push({ kind: 'ev', label: `Public/Storyteller: ${it.label}`, about: it.about, fn: (w) => Math.max(ST_NOISE, it.lik(w)) }));
+        continue;
+      }
+      const si = at(src);
+      if (si === undefined) continue;
+      const claim = claims[si];
+      const townsfolk = !!claim && charInfo(claim, script).team === 'townsfolk';
+      const left = (si - 1 + n) % n, right = (si + 1) % n;
+      const shown = items.slice(0, 2).map(it => it.label).join('; ') + (items.length > 2 ? `; +${items.length - 2} more` : '');
+      factors.push({ kind: 'ev', label: `${nm(src)}: ${shown}`, about: [...new Set(items.flatMap(it => it.about))], fn: (w) => {
+        if (w.evil[si]) return 1;
+        if (w.vortox && townsfolk) { let v = 1; for (const it of items) v *= Math.max(0.05, 1 - it.lik(w)); return v; }
+        let story = 1;
+        for (const it of items) story *= Math.max(0.02, it.lik(w));
+        const unreliable = has('nodashii') && (w.demon === left || w.demon === right) ? Math.max(droisonRate, 0.3) : droisonRate;
+        return (1 - unreliable) * story + unreliable;
+      } });
     }
     return factors;
   }
@@ -232,6 +281,21 @@ const Engine = (() => {
     const factors = buildFactors(state, script, idx, names);
     const F = factors.length;
 
+    // Vortox: if it is the Demon, Townsfolk info is false, and any day with no execution ends the game.
+    let vortoxOptions = [false];
+    const vortoxPrior = 1 / Math.max(1, script.characters.filter(c => charInfo(c, script).team === 'demon').length);
+    if (script.characters.includes('vortox')) {
+      const myTeam = state.myChar ? charInfo(state.myChar, script).team : '';
+      const executed = new Set();
+      state.players.forEach((p) => { if (p.dead && p.death && p.death.how === 'execution' && p.death.when) executed.add(p.death.when.n); });
+      (state.noms || []).forEach((x) => { if (x.executed) executed.add(x.day); });
+      let quietDay = false;
+      for (let d = 1; d < (state.phase ? state.phase.n : 1); d++) if (!executed.has(d)) quietDay = true;
+      if (state.myAlign === 'evil' && myTeam === 'demon') vortoxOptions = [state.myChar === 'vortox'];
+      else if (quietDay && !state.gameOver) vortoxOptions = [false];
+      else vortoxOptions = [false, true];
+    }
+
     const worlds = [];  // {evil:Uint8Array, demon, logf: Float64Array, logw}
     for (const combo of combinations(n, E)) {
       const set = new Set(combo);
@@ -244,22 +308,33 @@ const Engine = (() => {
       for (const d of combo) {
         if (forceDemon !== null && d !== forceDemon) continue;
         if (notDemon.has(d)) continue;
-        const w = { evil, demon: d };
-        const logf = new Float64Array(F);
-        let logw = 0;
-        for (let j = 0; j < F; j++) { const v = Math.log(factors[j].fn(w)); logf[j] = v; logw += v; }
-        worlds.push({ evil, demon: d, logf, logw });
+        for (const vortox of vortoxOptions) {
+          const w = { evil, demon: d, vortox };
+          const logf = new Float64Array(F);
+          let logw = vortoxOptions.length > 1 ? Math.log(vortox ? vortoxPrior : 1 - vortoxPrior) : 0;
+          for (let j = 0; j < F; j++) { const v = Math.log(factors[j].fn(w)); logf[j] = v; logw += v; }
+          worlds.push({ evil, demon: d, vortox, logf, logw });
+        }
       }
     }
     if (!worlds.length) return { error: 'Your locks (confirmed good/evil/Demon) contradict each other or the evil count. Loosen one of them.' };
 
-    const maxLog = Math.max(...worlds.map(w => w.logw));
-    let Z = 0;
+    let maxLog = -Infinity;
+    for (const w of worlds) if (w.logw > maxLog) maxLog = w.logw;
+    // Who holds the Demon now: if the starting Demon is dead and the game goes on, it passed to a living teammate.
+    const demonNow = (w) => {
+      if (!R[w.demon].dead || state.gameOver) return [[w.demon, 1]];
+      const heirs = [];
+      for (let i = 0; i < n; i++) if (i !== w.demon && w.evil[i] && !R[i].dead) heirs.push(i);
+      return heirs.length ? heirs.map(i => [i, 1 / heirs.length]) : [[w.demon, 1]];
+    };
+    let Z = 0, vortoxWeight = 0;
     const pe = new Float64Array(n), pd = new Float64Array(n);
     for (const w of worlds) {
       w.p = Math.exp(w.logw - maxLog); Z += w.p;
+      if (w.vortox) vortoxWeight += w.p;
       for (let i = 0; i < n; i++) if (w.evil[i]) pe[i] += w.p;
-      pd[w.demon] += w.p;
+      for (const [i, share] of demonNow(w)) pd[i] += w.p * share;
     }
     for (let i = 0; i < n; i++) { pe[i] /= Z; pd[i] /= Z; }
 
@@ -284,7 +359,7 @@ const Engine = (() => {
     for (const w of worlds) {
       const key = Array.from(w.evil).map((v, i) => (v ? i : -1)).filter(i => i >= 0).join(',');
       const t = teams.get(key) || { p: 0, demons: new Map(), members: key.split(',').map(Number) };
-      t.p += w.p / Z; t.demons.set(w.demon, (t.demons.get(w.demon) || 0) + w.p / Z);
+      t.p += w.p / Z; for (const [i, share] of demonNow(w)) t.demons.set(i, (t.demons.get(i) || 0) + (w.p / Z) * share);
       teams.set(key, t);
     }
     const topTeams = [...teams.values()].sort((a, b) => b.p - a.p).slice(0, 3).map(t => {
@@ -297,7 +372,8 @@ const Engine = (() => {
 
     const players = {};
     R.forEach((p, i) => { players[p.id] = { evil: pe[i], demon: pd[i], reasons: reasons[i].slice(0, 3) }; });
-    return { players, topTeams, worldCount: worlds.length, evilCount: E, prior, factorCount: factors.length };
+    return { players, topTeams, worldCount: worlds.length, evilCount: E, prior, factorCount: factors.length,
+      vortox: script.characters.includes('vortox') ? vortoxWeight / Z : null };
   }
 
   // ── Tips ─────────────────────────────────────────────────────────────────
@@ -514,7 +590,8 @@ const Engine = (() => {
     const info = charInfo(cover, script);
     const shape = abilityShape(info);
     const seen = new Set(); const issues = [];
-    const push = (level, text) => { if (!seen.has(text)) { seen.add(text); issues.push({ level, text }); } };
+    let ruleCheck = false; // set while checking the story against the role's rules and public events
+    const push = (level, text) => { if (!seen.has(text)) { seen.add(text); issues.push({ level, text, rule: ruleCheck }); } };
     const nameOf = (id) => (state.players.find(p => p.id === id) || {}).name || '?';
     const label = (ph) => phaseLabel(ph);
     const bluff = state.bluff || { demonBluffs: [], plan: [] };
@@ -551,6 +628,7 @@ const Engine = (() => {
     }
 
     // Public events
+    ruleCheck = true;
     const executedOn = new Set();
     state.players.forEach((p) => { if (p.dead && p.death && p.death.how === 'execution' && p.death.when) executedOn.add(p.death.when.n); });
     (state.noms || []).forEach((n) => { if (n.executed) executedOn.add(n.day); });
@@ -599,6 +677,7 @@ const Engine = (() => {
     if (shape.once && acts.filter(e => e.kind === 'did').length > 1) push('warn', `${info.name} can only act once per game, but your story has it acting more than once.`);
 
     // Nights you will be asked about
+    ruleCheck = false;
     const lastNight = state.phase.kind === 'day' ? state.phase.n : state.phase.n - 1;
     const missing = [];
     if (shape.firstOnly) { if (lastNight >= 1 && !entries.length) missing.push(1); }

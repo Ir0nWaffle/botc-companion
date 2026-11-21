@@ -351,9 +351,15 @@ with sync_playwright() as pw:
     check(page.evaluate("document.activeElement.id") != 'picker-q', 'opening the picker does not focus the search box')
     heads = page.evaluate("[...document.querySelectorAll('#picker-list > h3')].map(h => h.textContent)")
     check(heads == ['Townsfolk', 'Outsider', 'Minion', 'Demon'], f'picker groups the script by team in order ({heads})')
-    small = page.evaluate("""() => [...document.querySelectorAll('#picker .pick, #picker .pick-none')].filter(b => b.offsetParent).filter(b => { const r = b.getBoundingClientRect(); return r.width < 44 || r.height < 44; }).length""")
-    check(small == 0, 'picker touch targets are at least 44px')
+    tiny = """() => { const cells = [...document.querySelectorAll('#picker .pick, #picker .pick-none')].filter(b => !b.closest('details:not([open])'));
+      return { cells: cells.length, small: cells.filter(b => { const r = b.getBoundingClientRect(); return r.width < 44 || r.height < 44; }).length }; }"""
+    shown = page.evaluate(tiny)
+    check(shown['cells'] > 0 and shown['small'] == 0, 'picker touch targets are at least 44px')
     check(page.evaluate("document.querySelector('#picker details.pick-off').open") is False, '"Not on this script" starts collapsed')
+    page.click('#picker details.pick-off > summary')
+    expanded = page.evaluate(tiny)
+    check(expanded['cells'] > shown['cells'] and expanded['small'] == 0, 'off-script picker cells are at least 44px when expanded')
+    page.click('#picker details.pick-off > summary')
     check(page.locator('#picker .pick-none').is_visible(), 'a clear option is offered for your character')
     page.keyboard.press('Escape')
     check(page.locator('#picker').is_hidden(), 'Escape closes the picker')
@@ -948,7 +954,7 @@ with sync_playwright() as pw:
 
     # Offline bundle and cache
     sw = page.evaluate("fetch('sw.js').then(r => r.text())")
-    check("clocktower-companion-v6" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the v6 cache')
+    check("clocktower-companion-v7" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the current cache')
     check(page.evaluate("document.querySelector('script[src=\"js/coach.js\"]') !== null && [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/coach.js') < [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/engine.js')"), 'coach.js loads before engine.js')
 
     # ── Endgame coaching follows the win condition ──
@@ -984,6 +990,104 @@ with sync_playwright() as pw:
     }""")
     check('does not act on Night 1' in day1['monk'], 'Day 1 coaching stops a Monk claiming a Night 1 action')
     check('does not act' not in day1['chef'] and day1['chef'] != '', 'Day 1 coaching leaves Night 1 roles alone')
+
+    # ── Smarter liar-finder ──
+    solver = page.evaluate("""() => {
+      const TB = SCRIPTS['trouble-brewing'], SV = SCRIPTS['sects-violets'];
+      const mk = (n = 8) => Array.from({ length: n }, (_, i) => ({ id: 's' + i, name: 'S' + i, traveller: false, claims: [], dead: false, death: null, deadVoteUsed: false, gut: 0, lock: '', notes: '' }));
+      const game = (build = () => {}, n = 8) => { const s = { players: mk(n), meId: 's0', myChar: 'chef', myAlign: 'good', knownEvil: [], knownDemon: null, evilOverride: null,
+        phase: { kind: 'day', n: 3 }, evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] }, gameOver: false }; build(s); return s; };
+      const claim = (s, i, c, n = 1) => s.players[i].claims.push({ char: c, when: { kind: 'night', n } });
+      const kill = (s, i, how, kind, n) => { s.players[i].dead = true; s.players[i].death = { how, when: { kind, n } }; };
+      const align = (src, target, evil, k = 1) => ({ id: `a${src}_${target}_${k}`, source: 's' + src, type: 'align', template: 'align', players: ['s' + target], evil, n: 0, when: { kind: 'night', n: k }, char: '', yes: false, same: false, day: 1, text: '' });
+      const ft = (src, a, b, yes, k) => ({ id: `f${src}_${k}`, source: src === 'st' ? 'st' : 's' + src, type: 'ft', template: 'fortune', players: ['s' + a, 's' + b], yes, n: 0, when: { kind: 'night', n: k }, char: '', same: false, evil: false, day: 1, text: '' });
+      const E = (s, sc = TB) => Engine.analyze(s, sc);
+      const out = {};
+
+      // One unreliable story counts once, not once per clue.
+      const lied = (k) => game(s => { for (let j = 1; j <= k; j++) { s.evidence.push(align(1, 1 + j, true, j)); s.evidence.push(align(0, 1 + j, false, j)); } });
+      out.drunkOne = E(lied(1)).players.s1.evil; out.drunkThree = E(lied(3)).players.s1.evil;
+      const noDroison = { ...TB, characters: TB.characters.filter(c => !['drunk', 'poisoner'].includes(c)) };
+      out.cleanScript = E(lied(1), noDroison).players.s1.evil;
+
+      // The Demon can change hands.
+      const pass = game(s => { kill(s, 1, 'night', 'night', 2); s.players[1].lock = 'demon'; s.players[2].lock = 'evil'; });
+      out.passDead = E(pass).players.s1.demon; out.passHeir = E(pass).players.s2.demon;
+      const stale = (n) => E(game(s => { kill(s, 1, 'night', 'night', 2); s.evidence.push(ft('st', 1, 3, false, n)); })).players.s1.evil;
+      out.staleBefore = stale(1); out.staleAfter = stale(3);
+
+      // Executions: a Scarlet Woman only carries on with 5 or more alive.
+      const executed = (deadBefore) => game(s => { for (let i = 0; i < deadBefore; i++) kill(s, 7 - i, 'night', 'night', 1); kill(s, 1, 'execution', 'day', 2); });
+      const noSW = { ...TB, characters: TB.characters.filter(c => c !== 'scarletwoman') };
+      out.swManyWith = E(executed(0)).players.s1.evil; out.swManyWithout = E(executed(0), noSW).players.s1.evil;
+      out.swFewWith = E(executed(4)).players.s1.evil; out.swFewWithout = E(executed(4), noSW).players.s1.evil;
+
+      // Vortox.
+      const vx = (build) => E(game(s => { s.phase = { kind: 'day', n: 1 }; build(s); }), SV);
+      out.vortoxPrior = vx(() => {}).vortox;
+      out.tbNoVortox = E(game()).vortox;
+      out.quietDay = E(game(s => { kill(s, 1, 'execution', 'day', 1); }), SV).vortox;
+      out.executedDays = E(game(s => { kill(s, 1, 'execution', 'day', 1); kill(s, 2, 'execution', 'day', 2); }), SV).vortox;
+      out.iAmVortox = E(game(s => { s.myChar = 'vortox'; s.myAlign = 'evil'; s.knownEvil = ['s1']; s.phase = { kind: 'day', n: 1 }; }), SV).vortox;
+      out.iAmNoDashii = E(game(s => { s.myChar = 'nodashii'; s.myAlign = 'evil'; s.knownEvil = ['s1']; s.phase = { kind: 'day', n: 1 }; }), SV).vortox;
+      const contradictory = vx(s => { s.myChar = 'empath'; claim(s, 1, 'empath'); claim(s, 2, 'chef'); claim(s, 3, 'oracle');
+        [[0, 4], [1, 4], [2, 4], [3, 4]].forEach(([a, b], k) => { s.evidence.push(align(a, b, false, k + 1)); s.evidence.push(align(a, b, true, k + 11)); }); });
+      out.falseInfoRaisesVortox = (() => { const base = vx(() => {}).vortox;
+        const r = vx(s => { claim(s, 1, 'clockmaker'); claim(s, 2, 'dreamer'); s.myChar = 'seamstress'; s.players[4].lock = 'good';
+          s.evidence.push(align(0, 4, true, 1), align(1, 4, true, 2), align(2, 4, true, 3)); });
+        return r.vortox > base; })();
+
+      // Claims.
+      const changed = E(game(s => { claim(s, 1, 'monk', 1); claim(s, 1, 'chef', 2); }));
+      out.changedUp = changed.players.s1.evil; out.changedPrior = changed.prior;
+      out.changedReason = changed.players.s1.reasons.some(r => /changed their claim/.test(r.label));
+      const note = (player, kind, whenKind, n, targets = [], story = 'public') => ({ id: `n${player}${n}${kind}`, player: 's' + player, when: { kind: whenKind, n }, kind, targets: targets.map(x => 's' + x), char: '', text: 'x', story });
+      const monk = E(game(s => { claim(s, 1, 'monk'); kill(s, 2, 'night', 'night', 2); s.notes.push(note(1, 'did', 'night', 2, [2])); }));
+      out.monkBroken = monk.players.s1.evil; out.monkReason = monk.players.s1.reasons.some(r => /does not fit/.test(r.label));
+      const fine = E(game(s => { claim(s, 1, 'monk'); kill(s, 2, 'night', 'night', 2); s.notes.push(note(1, 'did', 'night', 2, [3])); }));
+      out.monkFine = fine.players.s1.evil;
+
+      // Your bluff and private notes never move the numbers.
+      const clean = E(game(s => { s.evidence.push(align(0, 1, true)); })).players;
+      const withBluff = E(game(s => { s.evidence.push(align(0, 1, true)); claim(s, 0, 'monk'); claim(s, 0, 'soldier', 2); s.notes.push(note(0, 'did', 'night', 1, [3])); s.notes.push(note(0, 'learned', 'night', 2, [4], 'true'));
+        s.bluff = { demonBluffs: [], plan: [note(0, 'did', 'night', 2, [5])] }; })).players;
+      out.bluffNeutral = Object.keys(clean).every(k => Math.abs(clean[k].evil - withBluff[k].evil) < 1e-9 && Math.abs(clean[k].demon - withBluff[k].demon) < 1e-9);
+
+      // Probabilities stay valid, and the largest game runs.
+      const sum = (r, k) => Object.values(r.players).reduce((a, p) => a + p[k], 0);
+      const busy = E(game(s => { kill(s, 1, 'night', 'night', 2); kill(s, 2, 'execution', 'day', 2); claim(s, 3, 'monk'); s.evidence.push(align(0, 4, true), ft(5, 6, 7, true, 2)); }));
+      out.demonSum = sum(busy, 'demon'); out.evilSum = sum(busy, 'evil'); out.evilCount = busy.evilCount;
+      const t0 = performance.now();
+      const huge = E(game(s => { s.evilOverride = 8; s.phase = { kind: 'day', n: 1 }; for (let i = 1; i < 15; i++) { s.evidence.push(align(i, (i + 1) % 15, i % 2 === 0, 1)); claim(s, i, SV.characters[i % SV.characters.length]); } }, 15), SV);
+      out.hugeWorlds = huge.worldCount; out.hugeMs = performance.now() - t0; out.hugeOk = !huge.error;
+      return out;
+    }""")
+    check(solver['drunkThree'] < 0.9, f"three false clues from one person can still be one drunk player ({solver['drunkThree']:.2f})")
+    check(solver['cleanScript'] > solver['drunkOne'], 'false info counts for more on a script with no drunkenness or poison')
+    check(solver['passDead'] < 0.01 and solver['passHeir'] > 0.99, 'a dead Demon passes to a living teammate')
+    check(solver['staleAfter'] > solver['staleBefore'], 'a Demon clue applies before that player died, not after')
+    check(solver['swManyWith'] > solver['swManyWithout'] and abs(solver['swFewWith'] - solver['swFewWithout']) < 1e-9, 'a Scarlet Woman makes an executed Demon more plausible only at 5+ alive')
+    check(abs(solver['vortoxPrior'] - 0.25) < 0.01, 'Vortox starts as one of the four S&V Demons')
+    check(solver['tbNoVortox'] is None, 'scripts without a Vortox show no Vortox chance')
+    check(solver['quietDay'] == 0, 'a day with no execution rules out the Vortox')
+    check(solver['executedDays'] > 0, 'executions every day keep the Vortox possible')
+    check(solver['iAmVortox'] == 1 and solver['iAmNoDashii'] == 0, 'a Demon knows whether it is the Vortox')
+    check(solver['falseInfoRaisesVortox'], 'Townsfolk info that looks false raises the Vortox chance')
+    check(solver['changedUp'] > solver['changedPrior'] and solver['changedReason'], 'changing a claim raises suspicion and explains why')
+    check(solver['monkBroken'] > solver['monkFine'] and solver['monkReason'], 'a story that breaks its role raises suspicion and explains why')
+    check(solver['bluffNeutral'], 'your bluff, plan and private notes never move the percentages')
+    check(abs(solver['demonSum'] - 1) < 1e-6 and abs(solver['evilSum'] - solver['evilCount']) < 1e-6, 'Demon and evil percentages stay valid')
+    check(solver['hugeOk'] and solver['hugeWorlds'] > 40000, f"the largest game runs ({solver['hugeWorlds']} worlds)")
+    check(solver['hugeMs'] < 15000, f"the largest game finishes in reasonable time ({solver['hugeMs']:.0f} ms)")
+    page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(220)
+    seed = {'v': 3, 'scriptId': 'sects-violets', 'players': [{'id': f'p{i}', 'name': n, 'claims': []} for i, n in enumerate(NAMES)], 'meId': 'p0', 'myChar': 'clockmaker', 'myAlign': 'good',
+            'phase': {'kind': 'day', 'n': 1}, 'evidence': [], 'noms': [], 'notes': [], 'tab': 'read'}
+    page.evaluate("(s) => localStorage.setItem('botc-companion-v1', JSON.stringify(s))", seed); page.reload()
+    check('Vortox chance: 25%' in page.locator('#view').inner_text(), 'Suspects shows the Vortox chance')
+    check('Most likely evil teams' not in page.locator('#view').inner_text(), 'no team is named before there are any clues')
+    page.click('details.rule > summary')
+    check('star-pass' in page.locator('details.rule').first.inner_text(), 'the explanation covers the new rules')
+    page.screenshot(path=str(SHOTS / '23-suspects-phone.png'))
 
     check(not errors, f'no console errors {errors}')
     browser.close()

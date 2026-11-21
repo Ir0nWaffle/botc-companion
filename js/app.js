@@ -51,7 +51,7 @@
   }
 
   function analysis() {
-    const key = JSON.stringify([state.players, state.evidence, state.noms, state.meId, state.myAlign, state.myChar, state.knownEvil, state.knownDemon, state.evilOverride, state.scriptId, state.gameOver]);
+    const key = JSON.stringify([state.players, state.evidence, state.noms, state.notes, state.phase, state.meId, state.myAlign, state.myChar, state.knownEvil, state.knownDemon, state.evilOverride, state.scriptId, state.gameOver]);
     if (analysisCache.key !== key) analysisCache = { key, value: Engine.analyze(state, script()) };
     return analysisCache.value;
   }
@@ -922,6 +922,7 @@
       <div class="card">
         <h2>Who's lying?</h2>
         <p class="faint" style="margin-top:0">${a.evilCount} evil players. Checked ${a.worldCount.toLocaleString()} possible teams against ${a.factorCount} clue${a.factorCount === 1 ? '' : 's'}. The grey tick marks the starting chance before any clues (${Math.round(a.prior * 100)}%).</p>
+        ${a.vortox !== null && a.vortox !== undefined ? `<div class="tip ${a.vortox >= 0.4 ? 'warn' : 'info'}"><b>Vortox chance: ${Math.round(a.vortox * 100)}%.</b> ${a.vortox > 0 ? 'If it is in play, all Townsfolk info is false.' : 'Ruled out for now.'}</div>` : ''}
         ${ranked.map(r => {
           const claim = Engine.claimOf(state, r.p);
           return `<div class="suspect" data-act="open-player" data-pid="${r.p.id}" style="cursor:pointer">
@@ -932,16 +933,18 @@
           </div>`;
         }).join('')}
       </div>
-      <div class="card"><h3>Most likely evil teams</h3>
+      ${a.factorCount ? `<div class="card"><h3>Most likely evil teams</h3>
         ${a.topTeams.map(t => `<div class="tip info"><span class="pct">${Math.round(t.p * 100)}%</span> · ${t.members.map(id => id === t.demon ? `<b class="team-demon">${esc(pname(id))} (Demon?)</b>` : esc(pname(id))).join(', ')}</div>`).join('')}
-      </div>
+      </div>` : ''}
       <div class="card"><h3>Tips</h3>${tipsHtml}</div>
       <details class="rule"><summary>How does this work?</summary><ul>
         <li>The app lists every way the evil team could be seated (with ${a.evilCount} evil players), and every choice of who is the Demon.</li>
-        <li>Each piece of info is checked in each possible world. <b>Evil players may say anything</b>, so their info doesn't count against a world. Info from a <b>good</b> player is usually true. If it's false, that world becomes less likely (they might be drunk or poisoned), but not impossible.</li>
-        <li>Suspicious claims (the same character claimed twice, characters not on the script), night deaths and executions without a win also shift the odds. Your reads count a little.</li>
+        <li>Each player's info is checked in each possible world as <b>one story</b>. Evil players may say anything. A good player is usually right, but a drunk or poisoned player can be wrong about everything at once, so three wrong clues from one person don't count three times against them.</li>
+        <li>Claims count too: double claims, characters not on the script, changed claims, and stories that break their role's rules or don't fit public events, like a Monk whose protected player died that night.</li>
+        <li><b>Demon %</b> means who holds the Demon <b>now</b>. If the likely starting Demon died and the game went on, that chance moves to their living teammates (star-pass or Scarlet Woman). Older Demon clues aren't applied after that point.</li>
+        <li>On scripts with the <b>Vortox</b>, the app also tests worlds where all Townsfolk info is false. A day with no execution rules it out.</li>
         <li>The percentage is the share of the remaining likely worlds where that player is evil. ▲/▼ shows which clue moved it most.</li>
-        <li>It only knows what you tell it, and it doesn't model every character (Vortox, Pit-Hag swaps, star passes). Treat it as a second opinion, not the answer.</li>
+        <li>It only knows what you tell it, and it can't model everything, such as Pit-Hag changes, alignment swaps or Storyteller choices. Treat it as a second opinion, not the answer.</li>
       </ul></details>`;
   }
 
