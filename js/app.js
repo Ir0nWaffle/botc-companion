@@ -11,8 +11,7 @@
       knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], gameOver: false, tab: 'setup' };
   }
   let state;
-  try { state = JSON.parse(localStorage.getItem(KEY)) || freshState(); } catch { state = freshState(); }
-  state = Object.assign(freshState(), state);
+  try { state = Engine.sanitizeGame(JSON.parse(localStorage.getItem(KEY)), freshState()); } catch { state = freshState(); }
   let uiTab = state.players.length ? (state.tab === 'setup' ? 'town' : state.tab) : 'setup';
   let analysisCache = { key: null, value: null };
 
@@ -535,14 +534,39 @@
   // ── Actions ──────────────────────────────────────────────────────────────
   function setDeath(p, how) {
     if (!how) { p.dead = false; p.death = null; p.deadVoteUsed = false; }
-    else { p.dead = true; p.death = { how, when: { ...state.phase } }; }
+    else {
+      // A night death noticed during the day happened the night before that day.
+      const when = how === 'night' ? { kind: 'night', n: state.phase.n } : { ...state.phase };
+      p.dead = true; p.death = { how, when };
+    }
+  }
+
+  // Was this player already dead when votes were cast on the given day?
+  function deadDuring(q, day) {
+    if (!q || !q.dead) return false;
+    if (!q.death || !q.death.when) return true;
+    const w = q.death.when;
+    return w.n < day || (w.n === day && w.kind === 'night');
+  }
+  function ghostVoteElsewhere(voterId, nomId) {
+    const q = player(voterId);
+    return state.noms.some(n => n.id !== nomId && (n.voters || []).includes(voterId) && deadDuring(q, n.day));
+  }
+  function refundGhostVote(voterId, nom) {
+    const q = player(voterId);
+    if (deadDuring(q, nom.day) && !ghostVoteElsewhere(voterId, nom.id)) q.deadVoteUsed = false;
+  }
+  // Undo the death caused by this nomination, leaving any other kind of death alone.
+  function undoExecution(nom) {
+    const q = player(nom.nominee);
+    if (q && q.dead && q.death && q.death.how === 'execution' && q.death.when && q.death.when.n === nom.day) setDeath(q, '');
   }
 
   function parseCustomScript(json) {
     const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
-    const known = {};
+    const known = Object.create(null);
     Object.keys(CHARACTERS).forEach(k => { known[norm(k)] = k; });
-    const extra = {};
+    const extra = Object.create(null);
     Object.entries(EXTRA_CHARACTERS).forEach(([k, v]) => { extra[norm(k)] = v; });
     let name = 'Custom script', entries = [];
     if (Array.isArray(json)) {
@@ -557,6 +581,7 @@
       const raw = typeof e === 'string' ? e : e && e.id; if (!raw) continue;
       const n = norm(raw);
       if (known[n]) { ids.push(known[n]); continue; }
+      if (!Engine.safeId(n)) continue;
       const obj = typeof e === 'object' ? e : {};
       const ex = extra[n] || {};
       const team = TEAMS.includes(obj.team) ? obj.team : (ex.team || 'townsfolk');
@@ -666,19 +691,23 @@
         const d = nomDraft;
         if (!d.nominator || !d.nominee) { alert('Pick the nominator and the nominee.'); return; }
         const old = d.id ? state.noms.find(n => n.id === d.id) : null;
-        // Ghost votes: mark dead voters as having used their vote.
-        (old ? old.voters : []).forEach(v => { if (!d.voters.includes(v)) { const q = player(v); if (q && q.dead) q.deadVoteUsed = false; } });
-        d.voters.forEach(v => { const q = player(v); if (q && q.dead) q.deadVoteUsed = true; });
+        // Only one execution per day: moving it brings the previous player back.
+        if (old && old.executed && (!d.executed || old.nominee !== d.nominee)) undoExecution(old);
         if (d.executed) {
-          state.noms.forEach(n => { if (n.day === d.day && n.id !== d.id && n.executed) { n.executed = false; } });
+          state.noms.forEach(n => { if (n.day === d.day && n.id !== d.id && n.executed) { undoExecution(n); n.executed = false; } });
           const q = player(d.nominee); if (q && !q.dead) { q.dead = true; q.death = { how: 'execution', when: { kind: 'day', n: d.day } }; }
-        } else if (old && old.executed) {
-          const q = player(d.nominee); if (q && q.death && q.death.how === 'execution') setDeath(q, '');
         }
+        // Ghost votes: only a player who was already dead on that day spends one.
+        (old ? old.voters : []).forEach(v => { if (!d.voters.includes(v)) refundGhostVote(v, old); });
+        d.voters.forEach(v => { const q = player(v); if (deadDuring(q, d.day)) q.deadVoteUsed = true; });
         if (!d.id) { d.id = uid(); state.noms.push(d); } else state.noms = state.noms.map(n => (n.id === d.id ? d : n));
         save(); closeSheet(); break;
       }
-      case 'del-nom': state.noms = state.noms.filter(n => n.id !== nomDraft.id); save(); closeSheet(); break;
+      case 'del-nom': {
+        const old = state.noms.find(n => n.id === nomDraft.id);
+        if (old) { if (old.executed) undoExecution(old); (old.voters || []).forEach(v => refundGhostVote(v, old)); }
+        state.noms = state.noms.filter(n => n.id !== nomDraft.id); save(); closeSheet(); break;
+      }
     }
   });
 
@@ -721,7 +750,7 @@
     }
     else if (el.id === 'game-file' && el.files[0]) {
       el.files[0].text().then(t => {
-        try { const s = JSON.parse(t); if (!Array.isArray(s.players)) throw new Error('not a game file'); state = Object.assign(freshState(), s); commit(); toast('Game loaded'); }
+        try { const s = JSON.parse(t); if (!Array.isArray(s.players)) throw new Error('not a game file'); state = Engine.sanitizeGame(s, freshState()); uiTab = state.players.length ? 'town' : 'setup'; commit(); toast('Game loaded'); }
         catch (err) { alert('Could not load that file: ' + err.message); }
       });
     }

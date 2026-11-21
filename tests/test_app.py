@@ -4,7 +4,7 @@ Run:  python3 tests/test_app.py   (needs Python Playwright + Chromium)
 Serves the repo on a random local port, drives the app in a phone-sized
 browser, checks the solver's conclusions, and saves screenshots to tests/screens/.
 """
-import functools, http.server, os, pathlib, socketserver, sys, threading
+import functools, http.server, json, os, pathlib, socketserver, sys, threading
 from playwright.sync_api import sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -157,6 +157,65 @@ with sync_playwright() as pw:
     # ── Persistence ──
     page.reload()
     check(page.evaluate('window.__companion.state.players.length') == 8, 'state survives reload')
+
+    # ── Nominations can be corrected ──
+    def player_state(name):
+        return page.evaluate('(n) => window.__companion.state.players.find(p => p.name === n)', name)
+    def nominate(target, voters=(), executed=True):
+        page.click('[data-act="new-nom"]')
+        page.select_option('#nom-a', pid['Cat']); page.select_option('#nom-b', pid[target])
+        for v in voters: page.click(f'.sheet [data-act="nom-voter"][data-pid="{pid[v]}"]')
+        if executed: page.click('[data-act="nom-exec"]')
+        page.click('[data-act="save-nom"]')
+    page.click('[data-tab="days"]')
+    page.click('tr[data-act="edit-nom"]'); page.click('[data-act="del-nom"]')
+    check(not player_state('Eve')['dead'], 'deleting an execution brings the player back')
+    nominate('Fay'); nominate('Gus')
+    check(not player_state('Fay')['dead'] and player_state('Gus')['dead'], 'moving an execution brings the first player back')
+    page.click('tr[data-act="edit-nom"] >> nth=1'); page.click('[data-act="nom-exec"]'); page.click('[data-act="save-nom"]')
+    check(not player_state('Gus')['dead'], 'unmarking an execution brings the player back')
+
+    # ── Ghost votes ──
+    page.click(f'[data-act="quick-death"][data-pid="{pid["Hal"]}"]')
+    check(player_state('Hal')['death']['when']['kind'] == 'night', 'a death tapped during the day is recorded as last night')
+    nominate('Dan', ['Hal'], executed=False)
+    check(player_state('Hal')['deadVoteUsed'], 'a dead voter spends their ghost vote')
+    page.click('tr[data-act="edit-nom"] >> nth=2'); page.click('[data-act="del-nom"]')
+    check(not player_state('Hal')['deadVoteUsed'], 'deleting the vote refunds the ghost vote')
+    nominate('Dan', ['Ben'], executed=False)
+    page.evaluate('''(id) => { const q = window.__companion.state.players.find(p => p.id === id);
+        q.dead = true; q.death = { how: 'night', when: { kind: 'night', n: 2 } }; }''', pid['Ben'])
+    page.click('tr[data-act="edit-nom"] >> nth=2'); page.click('[data-act="save-nom"]')
+    check(not player_state('Ben')['deadVoteUsed'], 'a vote cast while alive does not spend a ghost vote')
+
+    # ── Names and game files cannot inject code ──
+    bad = '<img src=x onerror="window.__xss=1">'
+    page.evaluate('''(b) => { const s = window.__companion.state; s.myChar = 'empath'; s.myAlign = 'good'; s.scriptId = 'trouble-brewing';
+        const e = s.players.find(p => p.name === 'Eve'); e.name = b; }''', bad)
+    page.click('[data-tab="read"]'); page.wait_for_timeout(100)
+    check(page.evaluate('window.__xss === undefined'), 'player names are not run as code in tips')
+    check(any(bad in t for t in page.locator('.tip').all_inner_texts()), 'the odd name is still shown as plain text')
+    hostile = {'players': [{'id': f'x"><img src=x onerror="window.__xss=2">', 'name': 'Bad'}, {'id': 'ok1', 'name': bad, 'claims': [{'char': 'chef"><img src=x onerror="window.__xss=3">'}]}],
+               'phase': {'kind': 'day', 'n': '<img src=x onerror="window.__xss=4">'}, 'scriptId': '__proto__', 'tab': 'nope',
+               'noms': [{'id': 'n1', 'day': 1, 'nominator': 'ok1', 'nominee': 'ok1', 'votes': '<img src=x onerror="window.__xss=5">', 'voters': []}],
+               'customScript': {'name': bad, 'characters': ['constructor', 'ok'], 'custom': {'ok': {'name': bad, 'team': '"><img src=x onerror="window.__xss=6">'}}}}
+    (SHOTS / 'hostile.json').write_text(json.dumps(hostile))
+    page.click('[data-tab="setup"]')
+    page.set_input_files('#game-file', str(SHOTS / 'hostile.json'))
+    page.wait_for_function('window.__companion.state.players.length === 1')
+    for t in ['town', 'info', 'days', 'read', 'guide', 'setup']: page.click(f'[data-tab="{t}"]')
+    page.wait_for_timeout(100)
+    check(page.evaluate('window.__xss === undefined'), 'a hostile game file cannot run code')
+    st = page.evaluate('window.__companion.state')
+    check(st['phase']['n'] == 1 and st['noms'][0]['votes'] == 0 and st['scriptId'] == 'trouble-brewing', 'malformed game values are replaced with safe ones')
+    page.evaluate('''() => { const s = window.__companion.state; s.customScript = null; }''')
+
+    # ── Installable app ──
+    manifest = page.evaluate("fetch('manifest.webmanifest').then(r => r.json())")
+    sizes = {i['sizes'] for i in manifest['icons'] if i['type'] == 'image/png'}
+    check({'192x192', '512x512'} <= sizes and any(i.get('purpose') == 'maskable' for i in manifest['icons']), 'manifest has install icons')
+    for src in [i['src'] for i in manifest['icons']] + ['icons/apple-touch-icon.png']:
+        check(page.evaluate('(u) => fetch(u).then(r => r.ok)', src), f'{src} is served')
 
     # Desktop width renders too
     page.set_viewport_size({'width': 1280, 'height': 900}); page.click('[data-tab="town"]')

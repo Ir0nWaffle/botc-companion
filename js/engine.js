@@ -17,6 +17,7 @@ const Engine = (() => {
     return { id, name: id, team: 'townsfolk', ability: '' };
   }
   const isEvilTeam = (team) => team === 'minion' || team === 'demon';
+  const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   function setupFor(count) {
     const n = Math.max(5, Math.min(15, count));
@@ -300,14 +301,16 @@ const Engine = (() => {
   }
 
   // ── Tips ─────────────────────────────────────────────────────────────────
-  function tips(state, script, analysis) {
+  // Tip text is rendered as HTML, so player and character names are escaped here.
+  function tips(rawState, script, analysis) {
+    const state = { ...rawState, players: rawState.players.map(p => ({ ...p, name: escHtml(p.name) })) };
     const out = [];
     const push = (level, text) => out.push({ level, text });
     const R = ring(state);
     const scriptSet = new Set(script.characters);
     const has = (id) => scriptSet.has(id);
     const nameOf = (id) => (state.players.find(p => p.id === id) || {}).name || '?';
-    const cname = (c) => charInfo(c, script).name;
+    const cname = (c) => escHtml(charInfo(c, script).name);
     const s = setupFor(R.length);
     const alive = aliveCount(state);
 
@@ -331,7 +334,7 @@ const Engine = (() => {
         push('warn', `<b>${ps.map(p => p.name).join(' and ')}</b> all claim <b>${cname(c)}</b>. At least one is lying${extra}.`);
       }
       const info = charInfo(c, script);
-      if (!has(c) && info.team !== 'traveller' && info.team !== 'fabled') push('warn', `<b>${ps.map(p => p.name).join(', ')}</b> claimed <b>${info.name}</b>, which is not on this script. That is almost certainly a lie.`);
+      if (!has(c) && info.team !== 'traveller' && info.team !== 'fabled') push('warn', `<b>${ps.map(p => p.name).join(', ')}</b> claimed <b>${cname(c)}</b>, which is not on this script. That is almost certainly a lie.`);
     }
     const outsiderClaims = claims.filter(x => x.c && charInfo(x.c, script).team === 'outsider');
     const tfClaims = claims.filter(x => x.c && charInfo(x.c, script).team === 'townsfolk');
@@ -361,10 +364,10 @@ const Engine = (() => {
         if (!isEvilTeam(info.team)) {
           const ps = ev.players.map(id => state.players.find(x => x.id === id)).filter(Boolean);
           const cs = ps.map(p => claimOf(state, p));
-          if (cs.every(Boolean) && !cs.includes(ev.char) && ev.char !== 'drunk') push('warn', `${src} says one of <b>${ps.map(p => p.name).join(' / ')}</b> is the <b>${info.name}</b>, but neither claims it. ${src} is lying, or one of those two is.`);
+          if (cs.every(Boolean) && !cs.includes(ev.char) && ev.char !== 'drunk') push('warn', `${src} says one of <b>${ps.map(p => p.name).join(' / ')}</b> is the <b>${cname(ev.char)}</b>, but neither claims it. ${src} is lying, or one of those two is.`);
         } else {
           const ps = ev.players.map(id => state.players.find(x => x.id === id)).filter(Boolean);
-          push('info', `${src}'s ${info.name} ping: one of <b>${ps.map(p => p.name).join(' / ')}</b> should be evil (unless ${src} is lying, or a Recluse is involved).`);
+          push('info', `${src}'s ${cname(ev.char)} ping: one of <b>${ps.map(p => p.name).join(' / ')}</b> should be evil (unless ${src} is lying, or a Recluse is involved).`);
         }
       }
       if (ev.type === 'ft' && ev.yes) push('info', `${src}'s Fortune Teller "yes" could be the red herring, a good player who registers as the Demon.`);
@@ -412,5 +415,57 @@ const Engine = (() => {
       .sort((a, b) => (b.safe - a.safe) || (a.team === 'townsfolk' ? -1 : 1));
   }
 
-  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring };
+  // ── Saved games ──────────────────────────────────────────────────────────
+  // Game files can come from other people, so keep only well-formed values.
+  function safeId(v) {
+    return typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v) && !['__proto__', 'constructor', 'prototype'].includes(v) ? v : null;
+  }
+  const safeNum = (v, min, max, fallback) => { const x = Number(v); return Number.isFinite(x) ? Math.max(min, Math.min(max, Math.trunc(x))) : fallback; };
+  const safeText = (v, max) => (v === null || v === undefined ? '' : String(v).slice(0, max));
+  const safePhase = (ph) => ({ kind: ph && ph.kind === 'day' ? 'day' : 'night', n: safeNum(ph && ph.n, 1, 99, 1) });
+  const safeIds = (list) => [...new Set((Array.isArray(list) ? list : []).map(safeId).filter(Boolean))];
+
+  function sanitizeGame(raw, base) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    const seen = new Set();
+    const players = (Array.isArray(s.players) ? s.players : []).flatMap((p) => {
+      const id = p && safeId(p.id);
+      if (!id || seen.has(id)) return [];
+      seen.add(id);
+      const how = p.death && ['night', 'execution', 'other'].includes(p.death.how) ? p.death.how : null;
+      return [{ id, name: safeText(p.name, 60), traveller: !!p.traveller,
+        claims: (Array.isArray(p.claims) ? p.claims : []).flatMap(c => (c && safeId(c.char) ? [{ char: c.char, when: safePhase(c.when) }] : [])),
+        dead: !!p.dead, death: p.dead && how ? { how, when: safePhase(p.death.when) } : null, deadVoteUsed: !!p.deadVoteUsed,
+        gut: safeNum(p.gut, -2, 2, 0), lock: ['good', 'evil', 'demon', 'notdemon'].includes(p.lock) ? p.lock : '', notes: safeText(p.notes, 5000) }];
+    });
+    const evidence = (Array.isArray(s.evidence) ? s.evidence : []).flatMap((e) => {
+      const id = e && safeId(e.id);
+      const source = e && (e.source === 'st' ? 'st' : safeId(e.source));
+      const type = e && safeId(e.type);
+      if (!id || !source || !type) return [];
+      return [{ id, source, type, template: safeId(e.template) || 'note', when: safePhase(e.when), players: safeIds(e.players), n: safeNum(e.n, 0, 99, 0),
+        char: safeId(e.char) || '', yes: !!e.yes, same: !!e.same, evil: !!e.evil, day: safeNum(e.day, 1, 99, 1), text: safeText(e.text, 2000) }];
+    });
+    const noms = (Array.isArray(s.noms) ? s.noms : []).flatMap((n) => {
+      const id = n && safeId(n.id);
+      if (!id || !safeId(n.nominator) || !safeId(n.nominee)) return [];
+      return [{ id, day: safeNum(n.day, 1, 99, 1), nominator: n.nominator, nominee: n.nominee, voters: safeIds(n.voters), votes: safeNum(n.votes, 0, 99, 0), executed: !!n.executed }];
+    });
+    let customScript = null;
+    if (s.customScript && typeof s.customScript === 'object') {
+      const custom = {};
+      Object.entries(s.customScript.custom || {}).forEach(([k, c]) => {
+        if (safeId(k) && c && typeof c === 'object') custom[k] = { name: safeText(c.name, 60) || k, team: TEAMS.includes(c.team) ? c.team : 'townsfolk', ability: safeText(c.ability, 500) };
+      });
+      customScript = { id: 'custom', name: safeText(s.customScript.name, 80) || 'Custom script', characters: safeIds(s.customScript.characters), custom };
+    }
+    const hasScript = s.scriptId === 'custom' ? !!customScript : Object.prototype.hasOwnProperty.call(SCRIPTS, s.scriptId);
+    const has = (id) => (seen.has(id) ? id : null);
+    return { ...base, scriptId: hasScript ? s.scriptId : base.scriptId, customScript, players, meId: has(s.meId), myChar: safeId(s.myChar) || '',
+      myAlign: s.myAlign === 'evil' ? 'evil' : 'good', knownEvil: safeIds(s.knownEvil).filter(has), knownDemon: has(s.knownDemon),
+      evilOverride: s.evilOverride ? safeNum(s.evilOverride, 1, 14, null) : null, phase: safePhase(s.phase), evidence, noms, gameOver: !!s.gameOver,
+      tab: ['setup', 'town', 'info', 'days', 'read', 'guide'].includes(s.tab) ? s.tab : base.tab };
+  }
+
+  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, safeId, sanitizeGame };
 })();

@@ -21,6 +21,12 @@ It's a static site with no build step. Open `index.html`, or serve it with Docke
 docker compose up -d        # http://<server>:8088/
 ```
 
+Phones and tablets need an **HTTPS** address to install the app and use it offline. Plain `http://<server>:8088` still opens, but browsers turn off both features there. To serve it privately over Tailscale:
+
+```bash
+tailscale serve --bg --https=8089 http://127.0.0.1:8088
+```
+
 ## Tests
 
 ```bash
