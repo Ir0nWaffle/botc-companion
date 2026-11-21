@@ -254,7 +254,7 @@ with sync_playwright() as pw:
     page.click('[data-tab="setup"]')
     page.set_input_files('#game-file', str(SHOTS / 'hostile.json'))
     page.wait_for_function('window.__companion.state.players.length === 1')
-    for t in ['town', 'info', 'days', 'read', 'guide', 'setup']: page.click(f'[data-tab="{t}"]')
+    for t in ['town', 'info', 'days', 'read', 'bluff', 'guide', 'setup']: page.click(f'[data-tab="{t}"]')
     page.wait_for_timeout(100)
     check(page.evaluate('window.__xss === undefined'), 'a hostile game file cannot run code')
     st = page.evaluate('window.__companion.state')
@@ -273,7 +273,7 @@ with sync_playwright() as pw:
     page.screenshot(path=str(SHOTS / '7-town-desktop.png'))
     check(page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'no horizontal scroll on desktop')
     page.set_viewport_size({'width': 360, 'height': 780})
-    for t in ['setup', 'town', 'info', 'days', 'read', 'guide']:
+    for t in ['setup', 'town', 'info', 'days', 'read', 'bluff', 'guide']:
         page.click(f'[data-tab="{t}"]')
         if page.evaluate('document.documentElement.scrollWidth > innerWidth'): check(False, f'no horizontal scroll at 360px on {t}')
 
@@ -287,7 +287,7 @@ with sync_playwright() as pw:
     page.select_option('#me-sel', pid['Ann']); pick('mychar', 'empath')
     page.evaluate("""(id) => { const s = window.__companion.state; s.players.find(p => p.id === id).claims = [{ char: 'chef', when: { kind: 'night', n: 1 } }]; }""", pid['Ben'])
     page.set_viewport_size({'width': 390, 'height': 844}); page.click('[data-tab="town"]')
-    check(page.locator('#tabs button').count() == 5, 'bottom navigation has five destinations')
+    check(page.locator('#tabs button').count() == 6, 'bottom navigation has six destinations')
     check(page.locator('.topbar [data-tab="setup"]').is_visible(), 'setup is reachable from the top bar')
     small = page.evaluate('''() => [...document.querySelectorAll('#tabs button, .topbar .icon-btn')].filter(b => { const r = b.getBoundingClientRect(); return r.width < 44 || r.height < 44; }).length''')
     check(small == 0, 'main navigation meets the 44px touch target')
@@ -297,7 +297,7 @@ with sync_playwright() as pw:
     page.click('[data-act="close-sheet"]')
     for size in [(768, 1024), (820, 1180)]:
         page.set_viewport_size({'width': size[0], 'height': size[1]}); page.wait_for_timeout(200)
-        for t in ['setup', 'town', 'info', 'days', 'read', 'guide']:
+        for t in ['setup', 'town', 'info', 'days', 'read', 'bluff', 'guide']:
             page.click(f'[data-tab="{t}"]')
             if page.evaluate('document.documentElement.scrollWidth > innerWidth'): check(False, f'no horizontal scroll at {size[0]}px on {t}')
     page.screenshot(path=str(SHOTS / '11-tablet-portrait.png'))
@@ -316,7 +316,7 @@ with sync_playwright() as pw:
     check(page.locator('#town-pane').is_hidden(), 'setup uses the full width')
     for size in [(1024, 768), (1180, 820)]:
         page.set_viewport_size({'width': size[0], 'height': size[1]}); page.wait_for_timeout(200)
-        for t in ['town', 'info', 'days', 'read', 'guide', 'setup']:
+        for t in ['town', 'info', 'days', 'read', 'bluff', 'guide', 'setup']:
             page.click(f'[data-tab="{t}"]')
             if page.evaluate('document.documentElement.scrollWidth > innerWidth'): check(False, f'no horizontal scroll at {size[0]}px on {t}')
     check(page.evaluate('window.__companion.state.players.length') == 8, 'layout changes keep the game')
@@ -602,6 +602,119 @@ with sync_playwright() as pw:
     check(page.locator('.toast .toast-undo').count() == 0 and page.evaluate('window.__companion.undoDepth') == 0, 'typing a note ends the undo history')
     check(field('notes') == 'Typed after the last action' and field('gut') == 2, 'typed notes and earlier changes are kept')
     page.click('[data-act="close-sheet"]')
+
+    # ── Bluff Studio: rules ──
+    rules = page.evaluate("""() => {
+      const mk = (n) => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i, claims: [], dead: false, death: null, gut: 0, lock: '', notes: '' }));
+      const sc = SCRIPTS['trouble-brewing'];
+      const line = (kind, whenKind, n, targets = [], text = 'x') => ({ id: 'l' + Math.random(), player: 'p0', when: { kind: whenKind, n }, kind, targets, char: '', text, story: 'public' });
+      const game = (cover, build = () => {}, extra = {}) => {
+        const s = { players: mk(8), meId: 'p0', myChar: 'imp', myAlign: 'evil', knownEvil: ['p3'], knownDemon: null, phase: { kind: 'day', n: 3 },
+          evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] }, ...extra };
+        if (cover) s.players[0].claims = [{ char: cover, when: { kind: 'day', n: 1 } }];
+        build(s); return s;
+      };
+      const has = (s, re) => Engine.bluffCheck(s, sc).issues.some(i => re.test(i.text));
+      const kill = (s, i, how, kind, n) => { s.players[i].dead = true; s.players[i].death = { how, when: { kind, n } }; };
+      const opts = (s) => Object.fromEntries(Engine.bluffOptions(s, sc).map(o => [o.id, o]));
+      const o = opts(game('', s => { s.bluff.demonBluffs = ['soldier']; s.players[2].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }));
+      return {
+        truthful: Engine.bluffCheck(game('imp'), sc).isBluff === false,
+        offScript: has(game('clockmaker'), /not on this script/),
+        rival: has(game('chef', s => { s.players[2].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }), /P2 also claims/),
+        teammate: has(game('chef', s => { s.players[3].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }), /Your teammate P3/),
+        notDemonBluff: has(game('chef', s => { s.bluff.demonBluffs = ['monk']; }), /not one of the Demon/),
+        isDemonBluff: has(game('monk', s => { s.bluff.demonBluffs = ['monk']; }), /is one of the Demon/),
+        chefNight2: has(game('chef', s => { s.bluff.plan = [line('learned', 'night', 2)]; }), /only learns something on Night 1/),
+        chefDay1Ok: !has(game('chef', s => { s.bluff.plan = [line('learned', 'day', 1)]; }), /only learns/),
+        monkNight1: has(game('monk', s => { s.bluff.plan = [line('did', 'night', 1, ['p1'])]; }), /does not act on Night 1/),
+        monkDied: has(game('monk', s => { kill(s, 1, 'night', 'night', 2); s.bluff.plan = [line('did', 'night', 2, ['p1'])]; }), /protected P1 on Night 2/),
+        undertakerNone: has(game('undertaker', s => { s.bluff.plan = [line('learned', 'night', 2)]; }), /Nobody was executed on Day 1/),
+        undertakerWrong: has(game('undertaker', s => { kill(s, 1, 'execution', 'day', 1); s.bluff.plan = [line('learned', 'night', 2, ['p2'])]; }), /P2 was not executed/),
+        undertakerOk: !has(game('undertaker', s => { kill(s, 1, 'execution', 'day', 1); s.bluff.plan = [line('learned', 'night', 2, ['p1'])]; }), /executed/),
+        undertakerFuture: !has(game('undertaker', s => { s.phase = { kind: 'day', n: 1 }; s.bluff.plan = [line('learned', 'night', 2)]; }), /Nobody was executed/),
+        soldierDied: has(game('soldier', s => kill(s, 0, 'night', 'night', 2)), /died at night/),
+        saintExecuted: has(game('saint', s => kill(s, 0, 'execution', 'day', 1)), /disproves a healthy Saint/),
+        ravenAlive: has(game('ravenkeeper', s => { s.bluff.plan = [line('learned', 'night', 2)]; }), /only learns something after dying/),
+        ravenDied: !has(game('ravenkeeper', s => { kill(s, 0, 'night', 'night', 2); s.bluff.plan = [line('learned', 'night', 2)]; }), /after dying|no ability/),
+        afterDeath: has(game('empath', s => { kill(s, 0, 'execution', 'day', 1); s.bluff.plan = [line('learned', 'night', 2)]; }), /would have no ability/),
+        slayerTwice: has(game('slayer', s => { s.bluff.plan = [line('did', 'day', 1), line('did', 'day', 2)]; }), /once per game/),
+        slayerNight: has(game('slayer', s => { s.bluff.plan = [line('did', 'night', 2)]; }), /during the day/),
+        virginMissed: has(game('virgin', s => { s.players[2].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }];
+          s.noms = [{ id: 'n', day: 1, nominator: 'p2', nominee: 'p0', voters: [], votes: 0, executed: false }]; }), /real Virgin would have triggered/),
+        tooManyOutsiders: has(game('saint', s => { s.players[1].claims = [{ char: 'recluse', when: { kind: 'day', n: 1 } }];
+          s.players[2].claims = [{ char: 'butler', when: { kind: 'day', n: 1 } }]; s.players[4].claims = [{ char: 'drunk', when: { kind: 'day', n: 1 } }]; }), /at most 3/),
+        changedClaim: has(game('chef', s => { s.players[0].claims = [{ char: 'monk', when: { kind: 'day', n: 1 } }, { char: 'chef', when: { kind: 'day', n: 2 } }]; }), /changed your claim/),
+        gap: has(game('empath', s => { s.bluff.plan = [line('learned', 'night', 1)]; }), /no story yet for Night 2, Night 3/),
+        demonBluffRanksFirst: Engine.bluffOptions(game('', s => { s.bluff.demonBluffs = ['soldier']; }), sc)[0].id === 'soldier',
+        takenIsRisky: o.chef.rating === 'risky' && o.chef.takenBy[0] === 'P2',
+        noDrunk: !o.drunk, noOwnRole: !opts(game('', s => { s.myChar = 'chef'; s.myAlign = 'good'; })).chef,
+        virginRisky: o.virgin.score < o.washerwoman.score,
+      };
+    }""")
+    for name, ok in rules.items(): check(ok is True, f'bluff rule: {name}')
+
+    # ── Bluff Studio: flow and privacy ──
+    page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(250)
+    seed = {'v': 3, 'players': [{'id': f'p{i}', 'name': n, 'claims': []} for i, n in enumerate(NAMES)], 'meId': 'p0', 'myChar': 'imp', 'myAlign': 'evil',
+            'knownEvil': ['p3'], 'phase': {'kind': 'day', 'n': 1}, 'evidence': [], 'noms': [], 'notes': [], 'tab': 'bluff'}
+    page.evaluate("(s) => localStorage.setItem('botc-companion-v1', JSON.stringify(s))", seed); page.reload()
+    gs = lambda: page.evaluate('window.__companion.state')
+    check(page.locator('#view h2').first.inner_text() == 'Bluff Studio', 'Bluff tab opens the studio')
+    pick('dbluff-0', 'soldier'); pick('dbluff-1', 'chef'); pick('dbluff-2', 'monk')
+    check(gs()['bluff']['demonBluffs'] == ['soldier', 'chef', 'monk'], 'the Demon\'s three bluffs are stored')
+    pick('dbluff-1', 'soldier')
+    check(gs()['bluff']['demonBluffs'].count('soldier') == 1, 'a Demon bluff cannot be stored twice')
+    page.click('.toast .toast-undo')
+    check(gs()['bluff']['demonBluffs'] == ['soldier', 'chef', 'monk'], 'Demon bluff changes can be undone')
+    page.click('[data-act="use-bluff"][data-char="chef"]')
+    check(gs()['players'][0]['claims'][-1]['char'] == 'chef' and gs()['myChar'] == 'imp', 'using a bluff sets the public claim only')
+    check('one of the Demon' in page.locator('#view').inner_text(), 'story check confirms a Demon bluff')
+    page.click('[data-act="plan-new"]')
+    page.click('[data-act="note-kind"][data-v="learned"]')
+    page.select_option('#note-when', 'night:2')
+    page.fill('#note-text', 'Secret plan line')
+    page.click('[data-act="save-note"]')
+    check(len(gs()['bluff']['plan']) == 1 and page.locator('#sheet').is_hidden(), 'a planned line saves and returns to the studio')
+    check('only learns something on Night 1' in page.locator('#view').inner_text(), 'story check flags a planned line that breaks the rules')
+    page.screenshot(path=str(SHOTS / '17-bluff-phone.png'))
+    page.screenshot(path=str(SHOTS / '18-bluff-phone-full.png'), full_page=True)
+    check(not any('Secret plan line' in json.dumps(x) for x in page.evaluate("Engine.timeline(window.__companion.state, 'p1')")), 'planned lines stay off other timelines')
+    check(not any('Secret plan line' in json.dumps(x) for x in page.evaluate("Engine.timeline(window.__companion.state, 'p0')")), 'planned lines stay off the public timeline')
+    page.click('[data-act="plan-edit"]'); page.select_option('#note-when', 'day:1')
+    page.click(f'.sheet [data-act="note-target"][data-pid="p1"]'); page.click('[data-act="save-note"]')
+    page.click('[data-act="plan-told"]')
+    g = gs()
+    check(g['bluff']['plan'] == [] and g['notes'][-1]['story'] == 'public' and g['evidence'] == [], 'marking as told makes a public note and adds no evidence')
+    check(any('Secret plan line' in json.dumps(x) for x in page.evaluate("Engine.timeline(window.__companion.state, 'p1')")), 'told lines appear on the named player\'s timeline')
+    page.click('.toast .toast-undo')
+    check(len(gs()['bluff']['plan']) == 1 and gs()['notes'] == [], 'marking as told can be undone')
+    page.click('[data-act="plan-told"]')
+    page.click('[data-act="edit-note"]'); page.click('[data-act="cancel-note"]')
+    check(page.locator('#sheet').is_hidden() and page.locator('#view h2').first.inner_text() == 'Bluff Studio', 'editing a told line returns to the studio')
+    page.reload()
+    check(gs()['tab'] == 'bluff' and gs()['bluff']['demonBluffs'] == ['soldier', 'chef', 'monk'], 'studio data survives reload')
+    clean = page.evaluate("""() => Engine.sanitizeGame({ players: [{ id: 'a', name: 'A' }], meId: 'a',
+      bluff: { demonBluffs: ['chef', 'x"><img', 'monk', 'soldier', 'mayor'], plan: [{ id: 'k', when: { kind: 'day', n: 'x' }, kind: 'nope', targets: ['a', 'zz'], text: 5 }, { id: 'b"ad' }] } },
+      { v: 3, tab: 'setup', scriptId: 'trouble-brewing', bluff: { demonBluffs: [], plan: [] } }).bluff""")
+    check(clean['demonBluffs'] == ['chef', 'monk', 'soldier'] and len(clean['plan']) == 1 and clean['plan'][0]['kind'] == 'said' and clean['plan'][0]['targets'] == ['a'], 'malformed bluff data is cleaned on load')
+    old_save = page.evaluate("""() => Engine.sanitizeGame({ v: 2, players: [{ id: 'a', name: 'A' }], notes: [] }, { v: 3, tab: 'setup', scriptId: 'trouble-brewing' }).bluff""")
+    check(old_save == {'demonBluffs': [], 'plan': []}, 'older saves gain an empty studio')
+    page.evaluate("""() => { const s = window.__companion.state; s.players[1].name = '<img src=x onerror="window.__xss=9">'; s.players[1].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }""")
+    page.click('[data-tab="guide"]'); page.click('[data-tab="bluff"]'); page.wait_for_timeout(100)
+    check(page.evaluate('window.__xss === undefined'), 'names cannot inject code into the studio')
+    page.evaluate("""() => { const s = window.__companion.state; s.players[1].name = 'Ben'; }""")
+    page.click('[data-tab="read"]')
+    check(page.locator('[data-goto="bluff"]').is_visible(), 'evil Suspects tab links to the studio')
+    page.click('[data-goto="bluff"]')
+    for w, h in [(360, 780), (768, 1024), (1180, 820)]:
+        page.set_viewport_size({'width': w, 'height': h}); page.wait_for_timeout(220)
+        page.click('[data-tab="bluff"]')
+        check(page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'studio fits at {w}px')
+        tab_ok = page.evaluate("""() => [...document.querySelectorAll('#tabs button')].every(b => { const r = b.getBoundingClientRect(); return r.width >= 44 && r.height >= 44; })""")
+        check(tab_ok, f'six nav items keep 44px targets at {w}px')
+    page.screenshot(path=str(SHOTS / '19-bluff-tablet.png'))
+    page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(220)
 
     check(not errors, f'no console errors {errors}')
     browser.close()

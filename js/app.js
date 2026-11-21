@@ -7,8 +7,8 @@
 
   // ── State ────────────────────────────────────────────────────────────────
   function freshState() {
-    return { v: 2, scriptId: 'trouble-brewing', customScript: null, players: [], meId: null, myChar: '', myAlign: 'good',
-      knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], notes: [], gameOver: false, tab: 'setup' };
+    return { v: 3, scriptId: 'trouble-brewing', customScript: null, players: [], meId: null, myChar: '', myAlign: 'good',
+      knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] }, gameOver: false, tab: 'setup' };
   }
   let state;
   try { state = Engine.sanitizeGame(JSON.parse(localStorage.getItem(KEY)), freshState()); } catch { state = freshState(); }
@@ -85,7 +85,8 @@
     let keep = true;
     if (sheetKind && sheetKind.startsWith('player:')) keep = ok(sheetKind.slice(7));
     else if (sheetKind === 'note') {
-      keep = !!noteDraft && ok(noteDraft.player) && (!noteDraft.id || state.notes.some(n => n.id === noteDraft.id));
+      const saved = noteDraft && noteDraft.plan ? state.bluff.plan : state.notes;
+      keep = !!noteDraft && ok(noteDraft.player) && (!noteDraft.id || saved.some(n => n.id === noteDraft.id));
       if (keep) noteDraft.targets = noteDraft.targets.filter(ok);
     } else if (sheetKind === 'ev') {
       keep = !!draft && (draft.source === 'st' || ok(draft.source)) && (!draft.id || state.evidence.some(e => e.id === draft.id));
@@ -122,7 +123,7 @@
     pane.innerHTML = twoPane ? viewTown() : '';
     document.body.classList.toggle('two-pane', twoPane);
     const panel = twoPane && uiTab === 'town' ? 'read' : uiTab;
-    $('#view').innerHTML = ({ setup: viewSetup, town: viewTown, info: viewInfo, days: viewDays, read: viewRead, guide: viewGuide })[panel]();
+    $('#view').innerHTML = ({ setup: viewSetup, town: viewTown, info: viewInfo, days: viewDays, read: viewRead, bluff: viewBluff, guide: viewGuide })[panel]();
     state.tab = uiTab; save();
   }
   wideScreen.addEventListener('change', () => render());
@@ -241,6 +242,11 @@
         });
         commit();
       }
+    } else if (pk.for === 'dbluff') {
+      const next = state.bluff.demonBluffs.filter((c, i) => i !== pk.slot && c !== v);
+      if (v) next.splice(Math.min(pk.slot, next.length), 0, v);
+      record(v ? `Demon bluff: ${ci(v).name}` : 'Demon bluff cleared', () => { state.bluff.demonBluffs = next; });
+      commit();
     } else if (pk.for === 'note' && noteDraft) { noteDraft.char = v; sheetNote(); }
     else if (pk.for === 'ev' && draft) { draft.char = v; sheetEvidence(); }
     focusPick(pk.key);
@@ -486,12 +492,18 @@
     const d = noteDraft;
     const isMe = d.player === state.meId;
     const phases = phaseList();
+    if (d.plan) { // A story can be prepared a few phases ahead.
+      let next = { ...state.phase };
+      for (let i = 0; i < 4; i++) { next = next.kind === 'night' ? { kind: 'day', n: next.n } : { kind: 'night', n: next.n + 1 }; phases.push(next); }
+    }
     if (!phases.some(ph => ph.kind === d.when.kind && ph.n === d.when.n)) phases.push(d.when);
+    phases.sort((a, b) => Engine.phaseRank(a) - Engine.phaseRank(b));
     openSheet(`
       <div class="grab"></div><button class="btn small close" data-act="cancel-note">Back</button>
-      <h2>${d.id ? 'Edit' : 'Add to'} ${isMe ? 'your' : esc(pname(d.player)) + '\'s'} timeline</h2>
+      <h2>${d.plan ? (d.id ? 'Edit planned line' : 'Plan a story line') : `${d.id ? 'Edit' : 'Add to'} ${isMe ? 'your' : esc(pname(d.player)) + '\'s'} timeline`}</h2>
       <div class="stack">
-        ${isMe ? `<div><label class="field">Is this what really happened?</label>
+        ${d.plan ? '<div class="faint">Private until you mark it as told.</div>' : ''}
+        ${isMe && !d.plan ? `<div><label class="field">Is this what really happened?</label>
           <div class="seg"><button data-act="note-story" data-v="true" class="${d.story === 'true' ? 'on' : ''}">Private truth</button><button data-act="note-story" data-v="public" class="${d.story === 'public' ? 'on' : ''}">What I told the table</button></div></div>` : ''}
         <div><label class="field" for="note-when">When</label><select id="note-when" data-note="when">${phases.map(ph => `<option value="${ph.kind}:${ph.n}" ${d.when.kind === ph.kind && d.when.n === ph.n ? 'selected' : ''}>${Engine.phaseLabel(ph)}</option>`).join('')}</select></div>
         <div><label class="field">${isMe ? 'What kind of note?' : 'What are they claiming?'}</label>
@@ -504,6 +516,75 @@
       </div>`);
   }
   function backToPlayer(pid) { noteDraft = null; draft = null; evReturn = null; sheetKind = 'player:' + pid; sheetPlayer(pid); }
+  let noteReturn = false; // true when the note form was opened from the Bluff tab rather than a player's sheet
+  function leaveNote(pid) { if (noteReturn) closeSheet(); else backToPlayer(pid); }
+
+  // ── Bluff Studio ─────────────────────────────────────────────────────────
+  function bluffStoryHtml() {
+    const planned = state.bluff.plan.map(n => ({ n, planned: true }));
+    const told = state.notes.filter(n => n.player === state.meId && n.story === 'public').map(n => ({ n, planned: false }));
+    const all = [...told, ...planned].sort((a, b) => Engine.phaseRank(a.n.when) - Engine.phaseRank(b.n.when));
+    if (!all.length) return '<div class="empty">No story yet. Plan what you will say before someone asks.</div>';
+    const groups = [];
+    all.forEach((x) => {
+      const label = Engine.phaseLabel(x.n.when);
+      if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
+      groups[groups.length - 1].items.push(x);
+    });
+    const kindName = (n) => (NOTE_KINDS.find(k => k[0] === n.kind) || NOTE_KINDS[2])[1];
+    return groups.map(g => `<div class="tl-phase"><div class="tl-label">${esc(g.label)}</div>${g.items.map(({ n, planned }) => `
+      <div class="tl-item story-line" data-act="${planned ? 'plan-edit' : 'edit-note'}" ${planned ? `data-planid="${n.id}"` : `data-noteid="${n.id}"`} role="button" tabindex="0">
+        <div class="tl-title">${kindName(n)} <span class="story ${planned ? 'planned' : 'public'}">${planned ? 'Planned' : 'Told the table'}</span></div>
+        ${noteText(n)}
+        ${planned ? `<button type="button" class="btn small" data-act="plan-told" data-planid="${n.id}">Mark as told</button>` : ''}
+      </div>`).join('')}</div>`).join('');
+  }
+
+  function viewBluff() {
+    if (!state.players.length) return `<div class="card empty"><p>Add players on the Setup tab first.</p><button class="btn primary" data-goto="setup">Go to setup</button></div>`;
+    const m = me();
+    if (!m) return `<div class="card empty"><h2>Bluff Studio</h2><p>Choose which player you are first.</p><button class="btn primary" data-goto="setup">Go to setup</button></div>`;
+    const sc = script();
+    const real = state.myChar ? ci(state.myChar) : null;
+    const cover = Engine.latestClaim(m);
+    const coverInfo = cover ? ci(cover) : null;
+    const check = Engine.bluffCheck(state, sc);
+    const options = Engine.bluffOptions(state, sc);
+    const tipClass = { bad: 'warn', warn: 'caution', info: 'info', good: 'good' };
+    const issues = check.issues.filter(i => i.level !== 'good');
+    const status = !cover ? '<div class="tip info">Pick a bluff below, or set your public claim, and this will check it against the game.</div>'
+      : !check.isBluff ? '<div class="tip good">You are telling the truth about your role, so there is nothing to keep straight.</div>'
+      : `${check.issues.filter(i => i.level === 'good').map(i => `<div class="tip good">${esc(i.text)}</div>`).join('')}
+         ${issues.length ? issues.map(i => `<div class="tip ${tipClass[i.level]}">${esc(i.text)}</div>`).join('') : '<div class="tip good">No conflicts with anything logged so far.</div>'}`;
+    const optionCard = (o) => `<div class="bluff-opt">
+      <span class="pk-ico">${icon(o.id)}</span>
+      <div class="grow"><div class="row between"><b class="team-${o.team}">${esc(o.name)}</b><span class="rating ${o.rating}">${{ strong: 'Strong', okay: 'Okay', risky: 'Risky' }[o.rating]}</span></div>
+        <div class="faint">${esc(o.ability)}</div>
+        <ul class="why">${o.reasons.map(r => `<li class="${r.good ? 'up' : 'down'}">${esc(r.text)}</li>`).join('')}</ul>
+        <button type="button" class="btn small ${o.id === cover ? '' : 'primary'}" data-act="use-bluff" data-char="${esc(o.id)}" ${o.id === cover ? 'disabled' : ''}>${o.id === cover ? 'Your current claim' : 'Use this bluff'}</button>
+      </div></div>`;
+    const myTeam = real ? real.team : '';
+    return `
+      <div class="card stack">
+        <div class="row between"><h2 style="margin:0">Bluff Studio</h2><span class="story private">Private</span></div>
+        <div class="truth-card"><span class="faint">Your true role</span><div><b class="${real ? 'team-' + real.team : ''}">${real ? esc(real.name) : 'Not set'}</b> <span class="muted">· ${isEvilMe() ? 'Evil' : 'Good'}</span></div></div>
+        <div><label class="field" for="claim-btn">What you are telling the table</label>${pickField(cover, 'claim', '— no claim —', `data-pid="${m.id}"`)}</div>
+        ${coverInfo && check.isBluff ? `<div class="faint"><b class="team-${coverInfo.team}">${esc(coverInfo.name)}</b>: ${esc(coverInfo.ability)}</div>` : ''}
+      </div>
+      <div class="card"><h3>Story check</h3>${status}</div>
+      ${isEvilMe() ? `<div class="card"><h3>The Demon's 3 bluffs</h3>
+        <p class="faint" style="margin-top:0">${myTeam === 'demon' ? 'The Storyteller shows you these on Night 1. They are not in play, so they are your safest claims.' : 'If your Demon shares them, record them here. They are not in play, so they are the safest claims.'}</p>
+        <div class="stack">${[0, 1, 2].map(i => pickField(state.bluff.demonBluffs[i] || '', `dbluff-${i}`, `Bluff ${i + 1}`)).join('')}</div></div>` : ''}
+      <div class="card">
+        <div class="row between"><h3 style="margin:0">Your story</h3><button class="btn small primary" data-act="plan-new">+ Plan a line</button></div>
+        <p class="faint">Plan what you will say, then mark it as told. Planned lines stay private and never reach the liar-finder.</p>
+        ${bluffStoryHtml()}
+      </div>
+      <div class="card"><h3>Best bluffs right now</h3>
+        ${options.slice(0, 5).map(optionCard).join('') || '<div class="empty">No good characters left to claim.</div>'}
+        ${options.length > 5 ? `<details class="pick-off"><summary>All other characters <span class="faint">(${options.length - 5})</span></summary>${options.slice(5).map(optionCard).join('')}</details>` : ''}
+      </div>`;
+  }
 
   // ── Info log ─────────────────────────────────────────────────────────────
   const TEMPLATES = [
@@ -794,11 +875,8 @@
     const tips = Engine.tips(state, sc, a);
     const tipsHtml = tips.map(t => `<div class="tip ${t.level}">${t.text}</div>`).join('');
     if (isEvilMe()) {
-      const b = Engine.bluffs(state, sc);
-      return `<div class="card"><h2>You're evil</h2><p class="muted">You already know your team, so this tab helps you blend in instead.</p>
-        <h3>Unclaimed good characters (possible bluffs)</h3>
-        ${b.map(c => `<div class="tip ${c.safe ? 'good' : 'info'}"><b class="team-${c.team}">${esc(c.name)}</b>${c.safe ? ' · <span class="faint">hard to disprove</span>' : ''}<br><span class="muted">${esc(c.ability)}</span></div>`).join('')}
-        <p class="faint">Use the bluffs your Demon gave you first: those characters are definitely not in play. Pick one that fits the number of Outsiders already claimed.</p></div>
+      return `<div class="card"><h2>You're evil</h2><p class="muted">You already know your team, so use the Bluff Studio to choose a cover and keep your story straight.</p>
+        <button class="btn primary" data-goto="bluff">Open Bluff Studio</button></div>
         <div class="card"><h3>Table talk</h3>${tipsHtml}</div>`;
     }
     if (a.error) return `<div class="card"><h2>Who's lying?</h2><div class="tip warn">${esc(a.error)}</div></div><div class="card"><h3>Tips</h3>${tipsHtml}</div>`;
@@ -862,7 +940,7 @@
     const s = $('#sheet'); const keep = s.hidden ? 0 : s.scrollTop;
     s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false; s.scrollTop = keep; syncLayer();
   }
-  function closeSheet() { closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; syncLayer(); render(); }
+  function closeSheet() { closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; noteReturn = false; syncLayer(); render(); }
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
@@ -970,6 +1048,7 @@
           state.evidence = state.evidence.filter(ev => ev.source !== pid && !(ev.players || []).includes(pid));
           state.noms = state.noms.filter(n => n.nominator !== pid && n.nominee !== pid).map(n => ({ ...n, voters: (n.voters || []).filter(v => v !== pid) }));
           state.notes = state.notes.filter(n => n.player !== pid).map(n => ({ ...n, targets: n.targets.filter(t => t !== pid) }));
+          state.bluff.plan = state.meId === pid ? [] : state.bluff.plan.map(n => ({ ...n, targets: n.targets.filter(t => t !== pid) }));
           if (state.meId === pid) state.meId = null;
           state.knownEvil = state.knownEvil.filter(x => x !== pid);
         });
@@ -1019,6 +1098,10 @@
         else if (f === 'mychar') openPicker({ key: f, for: f, selected: state.myChar || '', allowClear: true, clearLabel: 'Not told yet', exclude: [state.meId], title: 'Your character' });
         else if (f === 'note' && noteDraft) openPicker({ key: f, for: f, selected: noteDraft.char || '', allowClear: true, clearLabel: 'No character', exclude: [noteDraft.player], title: 'Which character?' });
         else if (f === 'ev' && draft) openPicker({ key: f, for: f, selected: draft.char || '', allowClear: false, title: 'Which character?' });
+        else if (f && f.startsWith('dbluff-')) {
+          const slot = Number(f.slice(7));
+          openPicker({ key: f, for: 'dbluff', slot, selected: state.bluff.demonBluffs[slot] || '', allowClear: true, clearLabel: 'No bluff', exclude: [state.meId], title: `Demon bluff ${slot + 1}` });
+        }
         break;
       }
       case 'pick': applyPick(el.dataset.char); break;
@@ -1058,9 +1141,34 @@
         sheetKind = 'note'; sheetNote(); break;
       case 'edit-note': {
         const n = state.notes.find(x => x.id === el.dataset.noteid); if (!n) return;
+        noteReturn = !sheetKind;
         noteDraft = JSON.parse(JSON.stringify(n)); sheetKind = 'note'; sheetNote(); break;
       }
-      case 'cancel-note': backToPlayer(noteDraft.player); break;
+      case 'use-bluff': {
+        const m = me(), c = el.dataset.char; if (!m || !c || Engine.latestClaim(m) === c) return;
+        record(`Now claiming ${ci(c).name}`, () => { m.claims.push({ char: c, when: { ...state.phase } }); });
+        commit(); window.scrollTo(0, 0); break;
+      }
+      case 'plan-new':
+        noteReturn = true;
+        noteDraft = { id: null, player: state.meId, when: { ...state.phase }, kind: 'did', targets: [], char: '', text: '', story: 'public', plan: true };
+        sheetKind = 'note'; sheetNote(); break;
+      case 'plan-edit': {
+        const n = state.bluff.plan.find(x => x.id === el.dataset.planid); if (!n) return;
+        noteReturn = true;
+        noteDraft = { ...JSON.parse(JSON.stringify(n)), plan: true }; sheetKind = 'note'; sheetNote(); break;
+      }
+      case 'plan-told': {
+        const n = state.bluff.plan.find(x => x.id === el.dataset.planid); if (!n) return;
+        // Once said out loud it becomes part of your public timeline, dated no later than now.
+        const when = Engine.phaseRank(n.when) > Engine.phaseRank(state.phase) ? { ...state.phase } : n.when;
+        record('Marked as told', () => {
+          state.bluff.plan = state.bluff.plan.filter(x => x.id !== n.id);
+          state.notes.push({ ...n, id: uid(), player: state.meId, when, story: 'public' });
+        });
+        commit(); break;
+      }
+      case 'cancel-note': leaveNote(noteDraft.player); break;
       case 'note-story': noteDraft.story = el.dataset.v; sheetNote(); break;
       case 'note-kind': noteDraft.kind = el.dataset.v; sheetNote(); break;
       case 'note-target':
@@ -1070,17 +1178,28 @@
         const d = noteDraft;
         d.text = d.text.trim();
         if (!d.text && !d.char && !d.targets.length) { toast('Add a player, character or details'); return; }
-        record('Added to timeline', () => { if (!d.id) { d.id = uid(); state.notes.push(d); } else state.notes = state.notes.map(n => (n.id === d.id ? d : n)); });
+        if (d.plan) {
+          const { plan: _plan, ...line } = d;
+          record('Added to your story', () => {
+            if (!line.id) { line.id = uid(); state.bluff.plan.push(line); } else state.bluff.plan = state.bluff.plan.map(n => (n.id === line.id ? line : n));
+          });
+        } else {
+          record('Added to timeline', () => { if (!d.id) { d.id = uid(); state.notes.push(d); } else state.notes = state.notes.map(n => (n.id === d.id ? d : n)); });
+        }
         save();
         if (el.dataset.more === '1') {
-          noteDraft = { id: null, player: d.player, when: { ...d.when }, kind: d.kind, targets: [], char: '', text: '', story: d.story };
+          noteDraft = { id: null, player: d.player, when: { ...d.when }, kind: d.kind, targets: [], char: '', text: '', story: d.story, ...(d.plan ? { plan: true } : {}) };
           sheetNote();
-        } else backToPlayer(d.player);
+        } else leaveNote(d.player);
         break;
       }
       case 'del-note': {
-        const owner = noteDraft.player, nid = noteDraft.id;
-        record('Note deleted', () => { state.notes = state.notes.filter(n => n.id !== nid); }); save(); backToPlayer(owner); break;
+        const owner = noteDraft.player, nid = noteDraft.id, wasPlan = noteDraft.plan;
+        record(wasPlan ? 'Planned line deleted' : 'Note deleted', () => {
+          if (wasPlan) state.bluff.plan = state.bluff.plan.filter(n => n.id !== nid);
+          else state.notes = state.notes.filter(n => n.id !== nid);
+        });
+        save(); leaveNote(owner); break;
       }
       case 'new-nom': nomDraft = { id: null, day: state.phase.n, nominator: '', nominee: '', voters: [], votes: 0, executed: false }; sheetKind = 'nom'; sheetNom(); break;
       case 'edit-nom': nomDraft = JSON.parse(JSON.stringify(state.noms.find(n => n.id === el.dataset.nid))); sheetKind = 'nom'; sheetNom(); break;
@@ -1124,7 +1243,11 @@
     const ch = el.dataset.change;
     if (el.dataset.input === 'pname') { render(); }
     else if (ch === 'script') { state.scriptId = el.value; commit(); }
-    else if (ch === 'me') { state.meId = el.value || null; commit(); }
+    else if (ch === 'me') {
+      state.meId = el.value || null;
+      state.bluff.plan = state.bluff.plan.map(x => ({ ...x, player: state.meId || x.player, targets: x.targets.filter(t => t !== state.meId) }));
+      commit();
+    }
     else if (ch === 'known-demon') { state.knownDemon = el.value || null; commit(); }
     else if (ch === 'evil-ov') { const v = parseInt(el.value, 10); state.evilOverride = v > 0 ? v : null; commit(); }
     else if (el.dataset.draft && draft) {

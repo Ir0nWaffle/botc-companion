@@ -449,6 +449,174 @@ const Engine = (() => {
     return out.map((item, i) => ({ item, i })).sort((a, b) => (phaseRank(a.item.when) - phaseRank(b.item.when)) || (a.i - b.i)).map(x => x.item);
   }
 
+  // ── Bluff Studio ─────────────────────────────────────────────────────────
+  // Works from the wording of each ability, so official and custom characters are treated alike.
+  const abilityShape = (c) => {
+    const ab = (c && c.ability) || '';
+    return {
+      firstOnly: /^You start knowing/i.test(ab),
+      nightly: /^Each night/i.test(ab) && c.id !== 'goon',
+      notFirstNight: /^Each night\*|^Once per game, at night\*/i.test(ab),
+      once: /^Once per game/i.test(ab),
+      dayOnly: /^Once per game, during the day/i.test(ab),
+      onDeath: /you die|you died|kills you/i.test(ab),
+    };
+  };
+  function outsiderRange(state, script) {
+    const s = setupFor(ring(state).length);
+    let min = s.outsider, max = s.outsider;
+    script.characters.forEach((c) => {
+      if (OUTSIDER_MODS[c]) { min = Math.min(min, s.outsider + OUTSIDER_MODS[c][0]); max = Math.max(max, s.outsider + OUTSIDER_MODS[c][1]); }
+    });
+    return { setup: s, min: Math.max(0, min), max };
+  }
+
+  // Good characters ranked by how safe they are to claim right now.
+  function bluffOptions(state, script) {
+    const others = ring(state).filter(p => p.id !== state.meId);
+    const demonBluffs = (state.bluff && state.bluff.demonBluffs) || [];
+    const range = outsiderRange(state, script);
+    const outsiders = others.filter(p => { const c = latestClaim(p); return c && charInfo(c, script).team === 'outsider'; }).length;
+    return script.characters.map(id => charInfo(id, script))
+      // Nobody is told they are the Drunk or the Lunatic, so claiming either gives the bluff away.
+      .filter(c => ['townsfolk', 'outsider'].includes(c.team) && c.id !== state.myChar && !['drunk', 'lunatic'].includes(c.id))
+      .map((c) => {
+        const shape = abilityShape(c);
+        const takenBy = others.filter(p => latestClaim(p) === c.id).map(p => p.name);
+        const reasons = [];
+        let score = 0;
+        const add = (n, why) => { score += n; reasons.push({ good: n > 0, text: why }); };
+        if (state.myAlign === 'evil' && demonBluffs.includes(c.id)) add(3, 'Not in play, so there is no real one (a Drunk could still think they are it)');
+        if (takenBy.length) add(-4, `Already claimed by ${takenBy.join(', ')}`);
+        if (c.team === 'outsider') {
+          if (outsiders >= range.max) add(-3, 'No Outsider slots left');
+          else if (outsiders >= range.setup.outsider) add(-1, 'Would mean more Outsiders than usual');
+        }
+        if (c.id === 'mutant') add(-2, 'Claiming it can get you executed');
+        if (c.id === 'virgin' || c.id === 'slayer') add(-2, 'Can be tested in public');
+        if (shape.firstOnly) add(1, 'Only one piece of info to invent');
+        else if (shape.nightly) add(-1, 'Needs a new story every night');
+        else if (!shape.once) add(1, 'No nightly story needed');
+        return { id: c.id, name: c.name, team: c.team, ability: c.ability, score, reasons, takenBy,
+          rating: score >= 2 ? 'strong' : score >= 0 ? 'okay' : 'risky' };
+      })
+      .sort((a, b) => (b.score - a.score) || (a.team === b.team ? 0 : a.team === 'townsfolk' ? -1 : 1));
+  }
+
+  // Compare your cover story with the public record. Issues are plain text.
+  function bluffCheck(state, script) {
+    const me = state.players.find(p => p.id === state.meId);
+    const cover = me ? latestClaim(me) : null;
+    if (!cover) return { cover: null, isBluff: false, issues: [], clean: false };
+    const isBluff = cover !== state.myChar;
+    if (!isBluff) return { cover, isBluff, issues: [], clean: true };
+
+    const info = charInfo(cover, script);
+    const shape = abilityShape(info);
+    const seen = new Set(); const issues = [];
+    const push = (level, text) => { if (!seen.has(text)) { seen.add(text); issues.push({ level, text }); } };
+    const nameOf = (id) => (state.players.find(p => p.id === id) || {}).name || '?';
+    const label = (ph) => phaseLabel(ph);
+    const bluff = state.bluff || { demonBluffs: [], plan: [] };
+    const entries = [...(bluff.plan || []), ...(state.notes || []).filter(n => n.player === me.id && n.story === 'public')];
+    const acts = entries.filter(e => e.kind !== 'said');
+    const R = ring(state);
+
+    // The role itself
+    if (!script.characters.includes(cover)) push('bad', `${info.name} is not on this script, so nobody will believe it.`);
+    if (isEvilTeam(info.team)) push('bad', `${info.name} is an evil character. Claiming it paints a target on you.`);
+    const team = state.myAlign === 'evil' ? new Set([...(state.knownEvil || []), state.knownDemon].filter(Boolean)) : new Set();
+    state.players.filter(p => p.id !== me.id && latestClaim(p) === cover).forEach((p) => {
+      push('bad', team.has(p.id) ? `Your teammate ${p.name} also claims ${info.name}. Agree who keeps it.` : `${p.name} also claims ${info.name}, so one of you will be called a liar.`);
+    });
+    const history = (me.claims || []).map(c => c.char).filter((c, i, a) => i === 0 || c !== a[i - 1]);
+    if (history.length > 1) push('warn', `You publicly changed your claim: ${history.map(c => charInfo(c, script).name).join(' → ')}. Have a reason ready.`);
+    if (state.myAlign === 'evil' && (bluff.demonBluffs || []).length) {
+      if (bluff.demonBluffs.includes(cover)) push('good', `${info.name} is one of the Demon's bluffs, so no real ${info.name} is in play.`);
+      else if (info.team === 'townsfolk' || info.team === 'outsider') push('warn', `${info.name} is not one of the Demon's bluffs, so the real one could be in play.`);
+    }
+
+    // Character counts
+    const claimsOf = (team) => R.filter(p => { const c = latestClaim(p); return c && charInfo(c, script).team === team; }).length;
+    const range = outsiderRange(state, script);
+    if (R.length >= 5 && info.team === 'outsider') {
+      const n = claimsOf('outsider');
+      if (n > range.max) push('bad', `That makes ${n} Outsider claims, but at most ${range.max} are possible.`);
+      else if (n > range.setup.outsider) push('warn', `That makes ${n} Outsider claims when ${range.setup.outsider} is normal. People will suspect a bluff or a Baron-style setup change.`);
+    }
+    if (R.length >= 5 && info.team === 'townsfolk') {
+      const slots = range.setup.townsfolk + (script.characters.includes('drunk') ? 1 : 0) + Math.max(0, range.setup.outsider - range.min);
+      const n = claimsOf('townsfolk');
+      if (n > slots) push('warn', `That makes ${n} Townsfolk claims, but only ${slots} can be real.`);
+    }
+
+    // Public events
+    const executedOn = new Set();
+    state.players.forEach((p) => { if (p.dead && p.death && p.death.how === 'execution' && p.death.when) executedOn.add(p.death.when.n); });
+    (state.noms || []).forEach((n) => { if (n.executed) executedOn.add(n.day); });
+    const executedPlayers = (day) => state.players.filter(p => p.dead && p.death && p.death.how === 'execution' && p.death.when && p.death.when.n === day).map(p => p.id);
+    const dayIsOver = (day) => phaseRank(state.phase) > day * 2 + 1;
+    const myDeath = me.dead && me.death ? me.death : null;
+    if ((cover === 'soldier' || cover === 'sailor') && myDeath && myDeath.how === 'night') push('warn', `You died at night, which a healthy ${info.name} should not. You will need to say you were drunk or poisoned.`);
+    if (cover === 'sailor' && myDeath && myDeath.how === 'execution') push('warn', 'You were executed, but a healthy Sailor cannot die.');
+    if (cover === 'saint' && myDeath && myDeath.how === 'execution' && !state.gameOver) push('bad', 'You were executed and the game went on, which disproves a healthy Saint.');
+    if (cover === 'virgin') {
+      const first = (state.noms || []).filter(n => n.nominee === me.id).sort((a, b) => a.day - b.day)[0];
+      if (first) {
+        const by = state.players.find(p => p.id === first.nominator);
+        const c = by && latestClaim(by);
+        const died = by && by.dead && by.death && by.death.how === 'execution' && by.death.when && by.death.when.n === first.day;
+        if (c && charInfo(c, script).team === 'townsfolk' && !died) push('warn', `${by.name} claims Townsfolk and nominated you first, but was not executed. A real Virgin would have triggered.`);
+      }
+    }
+
+    // Your story, line by line
+    const deathRank = myDeath ? phaseRank(myDeath.when) : Infinity;
+    entries.forEach((e) => {
+      const isAct = e.kind !== 'said';
+      if (isAct && e.when.kind === 'night') {
+        if (shape.firstOnly && e.when.n > 1) push('warn', `${info.name} only learns something on Night 1, but your story has info on ${label(e.when)}.`);
+        if (shape.notFirstNight && e.when.n === 1) push('bad', `${info.name} does not act on Night 1, but your story has it acting then.`);
+        if (shape.dayOnly) push('warn', `${info.name} acts during the day, but your story has it acting on ${label(e.when)}.`);
+      }
+      if (isAct && !shape.onDeath && phaseRank(e.when) > deathRank) push('bad', `You were dead by ${label(e.when)}, so ${info.name} would have no ability then.`);
+      if (cover === 'undertaker' && e.kind === 'learned' && e.when.n >= 2 && dayIsOver(e.when.n - 1)) {
+        const day = e.when.n - 1;
+        if (!executedOn.has(day)) push('bad', `Nobody was executed on Day ${day}, so an Undertaker would learn nothing on Night ${e.when.n}.`);
+        else {
+          const wrong = (e.targets || []).filter(t => !executedPlayers(day).includes(t));
+          if (wrong.length && executedPlayers(day).length) push('bad', `${wrong.map(nameOf).join(', ')} was not executed on Day ${day}, so an Undertaker could not have seen them.`);
+        }
+      }
+      if (cover === 'monk' && e.kind === 'did') {
+        (e.targets || []).forEach((t) => {
+          const q = state.players.find(p => p.id === t);
+          if (q && q.dead && q.death && q.death.how === 'night' && q.death.when && q.death.when.n === e.when.n) push('warn', `You protected ${q.name} on Night ${e.when.n}, but they died that night.`);
+        });
+      }
+    });
+    if (cover === 'ravenkeeper' && acts.some(e => e.kind === 'learned' || e.kind === 'did') && !(myDeath && myDeath.how === 'night')) push('bad', 'A Ravenkeeper only learns something after dying at night, and you have not.');
+    if (shape.once && acts.filter(e => e.kind === 'did').length > 1) push('warn', `${info.name} can only act once per game, but your story has it acting more than once.`);
+
+    // Nights you will be asked about
+    const lastNight = state.phase.kind === 'day' ? state.phase.n : state.phase.n - 1;
+    const missing = [];
+    if (shape.firstOnly) { if (lastNight >= 1 && !entries.length) missing.push(1); }
+    else if (shape.nightly) {
+      const told = new Set(entries.map(e => e.when.n));
+      for (let n = shape.notFirstNight ? 2 : 1; n <= lastNight; n++) {
+        if (n * 2 >= deathRank || told.has(n)) continue;
+        if (cover === 'undertaker' && !executedOn.has(n - 1)) continue;
+        missing.push(n);
+      }
+    }
+    if (missing.length) push('info', `You have no story yet for ${missing.map(n => `Night ${n}`).join(', ')}. Someone will ask.`);
+
+    const order = { bad: 0, warn: 1, info: 2, good: 3 };
+    issues.sort((a, b) => order[a.level] - order[b.level]);
+    return { cover, isBluff, issues, clean: !issues.some(i => i.level === 'bad' || i.level === 'warn') };
+  }
+
   // ── Saved games ──────────────────────────────────────────────────────────
   // Game files can come from other people, so keep only well-formed values.
   function safeId(v) {
@@ -492,6 +660,14 @@ const Engine = (() => {
         targets: safeIds(x.targets).filter(t => seen.has(t)), char: safeId(x.char) || '', text: safeText(x.text, 2000),
         story: x.story === 'true' && x.player === s.meId ? 'true' : 'public' }];
     });
+    const rawBluff = s.bluff && typeof s.bluff === 'object' ? s.bluff : {};
+    const bluff = { demonBluffs: safeIds(rawBluff.demonBluffs).slice(0, 3),
+      plan: (Array.isArray(rawBluff.plan) ? rawBluff.plan : []).flatMap((x) => {
+        const id = x && safeId(x.id);
+        if (!id) return [];
+        return [{ id, player: seen.has(x.player) ? x.player : (seen.has(s.meId) ? s.meId : ''), when: safePhase(x.when), kind: ['did', 'learned', 'said'].includes(x.kind) ? x.kind : 'said',
+          targets: safeIds(x.targets).filter(t => seen.has(t)), char: safeId(x.char) || '', text: safeText(x.text, 2000), story: 'public' }];
+      }) };
     let customScript = null;
     if (s.customScript && typeof s.customScript === 'object') {
       const custom = {};
@@ -504,9 +680,9 @@ const Engine = (() => {
     const has = (id) => (seen.has(id) ? id : null);
     return { ...base, scriptId: hasScript ? s.scriptId : base.scriptId, customScript, players, meId: has(s.meId), myChar: safeId(s.myChar) || '',
       myAlign: s.myAlign === 'evil' ? 'evil' : 'good', knownEvil: safeIds(s.knownEvil).filter(has), knownDemon: has(s.knownDemon),
-      evilOverride: s.evilOverride ? safeNum(s.evilOverride, 1, 14, null) : null, phase: safePhase(s.phase), evidence, noms, notes, gameOver: !!s.gameOver,
-      tab: ['setup', 'town', 'info', 'days', 'read', 'guide'].includes(s.tab) ? s.tab : base.tab };
+      evilOverride: s.evilOverride ? safeNum(s.evilOverride, 1, 14, null) : null, phase: safePhase(s.phase), evidence, noms, notes, bluff, gameOver: !!s.gameOver,
+      tab: ['setup', 'town', 'info', 'days', 'read', 'bluff', 'guide'].includes(s.tab) ? s.tab : base.tab };
   }
 
-  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, safeId, sanitizeGame };
+  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, phaseRank, bluffOptions, bluffCheck, safeId, sanitizeGame };
 })();
