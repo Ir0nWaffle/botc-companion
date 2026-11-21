@@ -4,19 +4,34 @@ Run:  python3 tests/test_app.py   (needs Python Playwright + Chromium)
 Serves the repo on a random local port, drives the app in a phone-sized
 browser, checks the solver's conclusions, and saves screenshots to tests/screens/.
 """
-import functools, http.server, json, os, pathlib, socketserver, sys, threading
+import functools, http.server, json, os, pathlib, re, socketserver, sys, threading, time
 from playwright.sync_api import sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SHOTS = ROOT / 'tests' / 'screens'
 SHOTS.mkdir(exist_ok=True)
 
+# Per-path tweaks so tests can simulate a bad network: DELAY seconds, a fixed STATUS, or a replacement BODY (bytes) with its type.
+DELAY, STATUS, BODY = {}, {}, {}
 class Quiet(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a): pass
+    def do_GET(self):
+        path = self.path.split('?')[0]
+        if path in DELAY: time.sleep(DELAY[path])
+        if path in STATUS or path in BODY:
+            body, ctype = BODY.get(path, (b'server error', 'text/plain'))
+            self.send_response(STATUS.get(path, 200)); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(body))); self.end_headers()
+            try: self.wfile.write(body)
+            except OSError: pass
+            return
+        try: super().do_GET()
+        except OSError: pass  # the browser gave up on a slow reply
 Handler = functools.partial(Quiet, directory=str(ROOT))
-httpd = socketserver.TCPServer(('127.0.0.1', 0), Handler)
+class Server(socketserver.ThreadingMixIn, socketserver.TCPServer): daemon_threads = True
+httpd = Server(('127.0.0.1', 0), Handler)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 URL = f'http://127.0.0.1:{httpd.server_address[1]}/index.html'
+BASE = URL.rsplit('/', 1)[0]
 
 failures = []
 def pick(btn, char):
@@ -34,8 +49,15 @@ def check(cond, msg):
 
 NAMES = ['Ann', 'Ben', 'Cat', 'Dan', 'Eve', 'Fay', 'Gus', 'Hal']
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import types, launch_checks
+LAUNCH = types.SimpleNamespace(check=check, URL=URL, BASE=BASE, ROOT=ROOT, SHOTS=SHOTS, DELAY=DELAY, STATUS=STATUS, BODY=BODY, numbers={})
+
 with sync_playwright() as pw:
     browser = pw.chromium.launch()
+    if os.environ.get('LAUNCH_ONLY'):  # development shortcut: only the launch-readiness checks
+        launch_checks.run(browser, LAUNCH); browser.close(); httpd.shutdown()
+        print(f'\n{"ALL PASSED" if not failures else str(len(failures)) + " FAILED"}'); sys.exit(1 if failures else 0)
     page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
@@ -467,7 +489,7 @@ with sync_playwright() as pw:
 
     # The bluffing rule: a fake story is a public note, never evidence
     set_claim('Ann', 'chef'); open_player('Ann')
-    check('What number did you get?' in page.locator('.sheet .prompt').first.inner_text() and 'told the table' in page.locator('.prompts label').inner_text(), 'while bluffing, prompts follow the public claim')
+    check('What number did you get?' in page.locator('.sheet .prompt').first.inner_text() and 'told the table' in page.locator('.prompts .field').inner_text(), 'while bluffing, prompts follow the public claim')
     ev0, n0 = len(S()['evidence']), len(S()['notes'])
     page.click('.sheet .prompt >> nth=0')
     check(page.locator('#ev-tpl').count() == 0 and page.locator('#note-text').is_visible(), 'a bluff prompt opens the note form, not the info form')
@@ -954,7 +976,7 @@ with sync_playwright() as pw:
 
     # Offline bundle and cache
     sw = page.evaluate("fetch('sw.js').then(r => r.text())")
-    check("clocktower-companion-v7" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the current cache')
+    check("clocktower-companion-v8" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the current cache')
     check(page.evaluate("document.querySelector('script[src=\"js/coach.js\"]') !== null && [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/coach.js') < [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/engine.js')"), 'coach.js loads before engine.js')
 
     # ── Endgame coaching follows the win condition ──
@@ -1089,7 +1111,27 @@ with sync_playwright() as pw:
     check('star-pass' in page.locator('details.rule').first.inner_text(), 'the explanation covers the new rules')
     page.screenshot(path=str(SHOTS / '23-suspects-phone.png'))
 
+    # ── Launch review fixes ──
+    seed = {'v': 3, 'players': [{'id': f'p{i}', 'name': n, 'claims': []} for i, n in enumerate(NAMES)], 'meId': 'p0', 'myChar': 'imp', 'myAlign': 'evil',
+            'knownEvil': ['p3'], 'phase': {'kind': 'day', 'n': 1}, 'evidence': [], 'noms': [], 'notes': [], 'tab': 'town'}
+    page.wait_for_timeout(220)
+    page.evaluate("(s) => localStorage.setItem('botc-companion-v1', JSON.stringify(s))", seed)
+    for w, h in [(844, 390), (667, 375)]:
+        page.set_viewport_size({'width': w, 'height': h}); page.reload(); page.wait_for_timeout(250)
+        fit = page.evaluate("""() => { scrollTo(0, 0); return [...document.querySelectorAll('.token .disc')].every(d => { const r = d.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }); }""")
+        check(fit, f'every seat fits on screen in phone landscape at {w}x{h}')
+    page.set_viewport_size({'width': 1180, 'height': 820}); page.wait_for_timeout(250)
+    page.click('[data-tab="bluff"]'); page.click('#town-pane .token[data-pid="p1"]'); page.wait_for_timeout(320)
+    check(page.locator('[id="claim-btn"]').count() == 1, 'the Bluff tab and a player sheet do not share a control id')
+    page.click('.sheet #claim-btn'); page.wait_for_selector('#picker:not([hidden])'); page.keyboard.press('Escape'); page.wait_for_selector('#picker', state='hidden')
+    check(page.evaluate("document.activeElement.id === 'claim-btn' && !!document.activeElement.closest('#sheet')"), 'closing the picker returns focus inside the open sheet')
+    page.click('[data-act="close-sheet"]')
+    page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(220)
+
     check(not errors, f'no console errors {errors}')
+    print('\n── Launch-readiness checks ──')
+    launch_checks.run(browser, LAUNCH)
+    print('numbers:', json.dumps(LAUNCH.numbers))
     browser.close()
 
 httpd.shutdown()

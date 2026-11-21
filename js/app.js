@@ -4,14 +4,44 @@
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const uid = () => Math.random().toString(36).slice(2, 9);
+  // A row of related buttons is a labelled group, not a <label> for nothing.
+  const grpLbl = (id, html) => `<div class="field" id="g-${id}">${html}</div>`;
+  const grp = (id) => `role="group" aria-labelledby="g-${id}"`;
 
   // ── State ────────────────────────────────────────────────────────────────
   function freshState() {
     return { v: 3, scriptId: 'trouble-brewing', customScript: null, players: [], meId: null, myChar: '', myAlign: 'good',
       knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] }, gameOver: false, tab: 'setup' };
   }
-  let state;
-  try { state = Engine.sanitizeGame(JSON.parse(localStorage.getItem(KEY)), freshState()); } catch { state = freshState(); }
+  // Saved-game storage. It can be missing (private modes, blocked site data), full, or hold damaged text.
+  let storageOk = true;      // false after a failed write, true again after a good one
+  let saveWarned = false;    // the "not saving" warning is shown once per page load
+  let startupNote = null;    // shown once after the first render, e.g. when a damaged save was set aside
+  const BACKUP_KEY = KEY + '-corrupt';
+  function backupCorrupt(raw) {
+    try {
+      localStorage.setItem(BACKUP_KEY + '-' + Date.now(), raw);
+      const old = Object.keys(localStorage).filter(k => k.startsWith(BACKUP_KEY)).sort();
+      old.slice(0, Math.max(0, old.length - 3)).forEach(k => localStorage.removeItem(k)); // keep the newest few
+      return true;
+    } catch { return false; }
+  }
+  function loadSaved() {
+    let raw = null;
+    try { raw = localStorage.getItem(KEY); } catch { storageOk = false; return freshState(); }
+    if (raw === null) return freshState();
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not a game');
+      return Engine.sanitizeGame(parsed, freshState());
+    } catch {
+      startupNote = backupCorrupt(raw)
+        ? 'Your saved game could not be read, so this is a fresh start. The old data was kept in this browser as a backup.'
+        : 'Your saved game could not be read, so this is a fresh start.';
+      return freshState();
+    }
+  }
+  let state = loadSaved();
   let uiTab = state.players.length ? (state.tab === 'setup' ? 'town' : state.tab) : 'setup';
   let analysisCache = { key: null, value: null };
   // Which coaching expanders are open. In memory only: never saved, and never an undo step.
@@ -31,7 +61,18 @@
       ${c.generic ? '<p class="faint">General advice for this kind of character. There are no notes for this specific one.</p>' : ''}</div>`;
   }
 
-  function save() { dropStaleUndo(); try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} }
+  let dry = false; // while true, nothing is written (used to trial-run a loaded game)
+  const NOT_SAVING = 'This device is not saving your game. Keep a copy with "Save game to file" on the Setup tab.';
+  function save() {
+    if (dry) return;
+    dropStaleUndo(); analysisKeyMemo = null;
+    try { localStorage.setItem(KEY, JSON.stringify(state)); storageOk = true; }
+    catch {
+      storageOk = false;
+      // Say so once, and only when there is a game to lose; the Setup tab keeps showing it.
+      if (!saveWarned && state.players.length) { saveWarned = true; toast(NOT_SAVING, false, 8000); }
+    }
+  }
   function commit() { save(); render(); }
 
   const script = () => (state.scriptId === 'custom' && state.customScript) ? state.customScript : (SCRIPTS[state.scriptId] || SCRIPTS['trouble-brewing']);
@@ -50,22 +91,36 @@
     try { return getCharacterIconSVG(key, info.team); } catch { return '<span class="q">?</span>'; }
   }
 
+  // The solver only reads these parts of the game. Typed notes (and the Bluff Studio) are left out of the key, so editing
+  // them never re-runs the solver. The key is built once per render pass: save() clears it after every change.
+  let analysisKeyMemo = null;
   function analysis() {
-    const key = JSON.stringify([state.players, state.evidence, state.noms, state.notes, state.phase, state.meId, state.myAlign, state.myChar, state.knownEvil, state.knownDemon, state.evilOverride, state.scriptId, state.gameOver]);
+    const key = analysisKeyMemo || (analysisKeyMemo = JSON.stringify([state.players.map(({ notes, ...p }) => p), state.evidence, state.noms, state.phase, state.meId, state.myAlign, state.myChar,
+      state.knownEvil, state.knownDemon, state.evilOverride, state.scriptId, state.customScript, state.gameOver]));
     if (analysisCache.key !== key) analysisCache = { key, value: Engine.analyze(state, script()) };
     return analysisCache.value;
+  }
+
+  // Screen readers hear toasts and phase changes through one polite live region (#live), so re-renders stay silent.
+  const liveQ = []; let liveT = null;
+  function announce(msg) {
+    liveQ.push(msg);
+    const el = $('#live'); if (!el) return;
+    el.textContent = ''; clearTimeout(liveT);
+    liveT = setTimeout(() => { el.textContent = liveQ.splice(0).join('. '); }, 80);
   }
 
   // One toast at a time. A toast with an Undo button stays for 6 seconds.
   let toastTimer = null;
   function hideToast() { clearTimeout(toastTimer); document.querySelectorAll('.toast').forEach(t => t.remove()); }
-  function toast(msg, canUndo = false) {
+  function toast(msg, canUndo = false, ms = 0) {
     hideToast();
-    const t = document.createElement('div'); t.className = 'toast' + (canUndo ? ' has-undo' : ''); t.setAttribute('role', 'status');
-    const m = document.createElement('span'); m.className = 'toast-msg'; m.textContent = msg; t.appendChild(m);
+    const t = document.createElement('div'); t.className = 'toast' + (canUndo ? ' has-undo' : '');
+    const m = document.createElement('span'); m.className = 'toast-msg'; m.textContent = msg; m.setAttribute('aria-hidden', 'true'); t.appendChild(m);
     if (canUndo) { const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-undo'; b.dataset.act = 'undo'; b.textContent = 'Undo'; t.appendChild(b); }
     document.body.appendChild(t);
-    toastTimer = setTimeout(() => t.remove(), canUndo ? 6000 : 1800);
+    announce(msg);
+    toastTimer = setTimeout(() => t.remove(), ms || (canUndo ? 6000 : 1800));
   }
 
   // ── Undo ─────────────────────────────────────────────────────────────────
@@ -117,12 +172,48 @@
 
   // ── Shell ────────────────────────────────────────────────────────────────
   const wideScreen = window.matchMedia('(min-width: 900px)');
+  const shortLand = window.matchMedia('(max-height: 540px) and (orientation: landscape)'); // phones turned sideways
+  // Two panes (town beside the tab) only when the town can be drawn big enough to tap; a short wide screen gets one pane.
+  const twoPaneOk = () => wideScreen.matches && window.innerHeight >= 560;
   const PHASE_ICON = {
     night: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>',
     day: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="currentColor"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg>',
   };
 
+  // ── Focus helpers ─────────────────────────────────────────────────────────
+  // Re-rendering replaces elements, so remember which control had focus and give it back to its twin afterwards.
+  // Visible and actually rendered: the contents of a closed <details> still report layout boxes in some browsers.
+  const shown = (n) => (n.checkVisibility ? n.checkVisibility() : n.getClientRects().length > 0);
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+  const dataSel = (k, v) => `[data-${k.replace(/[A-Z]/g, m => '-' + m.toLowerCase())}="${String(v).replace(/["\\]/g, '\\$&')}"]`;
+  function focusKey(el) {
+    if (!el || el === document.body || !el.localName) return null;
+    if (el.id) return '#' + CSS.escape(el.id);
+    const ds = Object.entries(el.dataset);
+    return ds.length ? el.localName + ds.map(([k, v]) => dataSel(k, v)).join('') : null;
+  }
+  function holdFocus(...roots) {
+    const a = document.activeElement;
+    const root = a && roots.find(r => r && r.contains(a));
+    if (!root) return () => {};
+    const key = focusKey(a), idx = key ? [...root.querySelectorAll(key)].indexOf(a) : -1, isText = a.matches('input:not([type=checkbox]):not([type=radio]), textarea');
+    const sel = isText && typeof a.selectionStart === 'number' ? [a.selectionStart, a.selectionEnd] : null;
+    return () => {
+      if (!key) return;
+      const hits = root.querySelectorAll(key), t = hits[Math.max(0, Math.min(idx, hits.length - 1))];
+      if (!t || t === document.activeElement) return;
+      t.focus({ preventScroll: true });
+      if (sel) { try { t.setSelectionRange(sel[0], sel[1]); } catch { /* not a text control */ } }
+    };
+  }
+  // Toggle buttons report their state to assistive tech from the same "on" class that styles them.
+  function syncPressed(root) {
+    root.querySelectorAll('.seg button, .chip-btn[data-act], button[data-act="toggle-trav"]').forEach((b) => { b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false'); });
+  }
+  let lastPhaseLabel = null;
+
   function render() {
+    const restore = holdFocus($('#view'), $('#town-pane'), $('#phase-chip'));
     document.querySelectorAll('button[data-tab]').forEach((b) => {
       const on = b.dataset.tab === uiTab;
       b.classList.toggle('active', on);
@@ -130,19 +221,25 @@
     });
     const ph = state.phase;
     $('#phase-chip').innerHTML = state.players.length
-      ? `<span class="chip ${ph.kind}">${PHASE_ICON[ph.kind]} ${Engine.phaseLabel(ph)}</span><button class="btn small" data-act="next-phase" title="Advance to the next phase">Next ›</button>`
+      ? `<span class="chip ${ph.kind}">${PHASE_ICON[ph.kind]} ${Engine.phaseLabel(ph)}</span><button class="btn small" data-act="next-phase" title="Advance to the next phase" aria-label="Next phase, now ${Engine.phaseLabel(ph)}">Next ›</button>`
       : '';
+    const label = Engine.phaseLabel(ph);
+    if (state.players.length && lastPhaseLabel !== null && label !== lastPhaseLabel && !liveQ.some(m => m.includes(label))) announce('Now ' + label);
+    lastPhaseLabel = state.players.length ? label : null;
     // On wide screens the town stays visible beside the active panel.
-    const twoPane = wideScreen.matches && state.players.length > 0 && !['setup', 'guide'].includes(uiTab);
+    const twoPane = twoPaneOk() && state.players.length > 0 && !['setup', 'guide'].includes(uiTab);
     const pane = $('#town-pane');
     pane.hidden = !twoPane;
     pane.innerHTML = twoPane ? viewTown() : '';
     document.body.classList.toggle('two-pane', twoPane);
     const panel = twoPane && uiTab === 'town' ? 'read' : uiTab;
     $('#view').innerHTML = ({ setup: viewSetup, town: viewTown, info: viewInfo, days: viewDays, read: viewRead, bluff: viewBluff, guide: viewGuide })[panel]();
+    syncPressed($('#view')); syncPressed(pane);
+    restore();
     state.tab = uiTab; save();
   }
   wideScreen.addEventListener('change', () => render());
+  shortLand.addEventListener('change', () => render());
 
   document.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]'); if (!b) return;
@@ -171,16 +268,23 @@
   }
   // ── Character picker ─────────────────────────────────────────────────────
   // One reusable layer over whatever is open. It never touches the sheet underneath, so drafts survive.
-  const INERT_SEL = '#sheet, #view, #town-pane, .tabs, .topbar';
+  const PAGE_SEL = '#view, #town-pane, .tabs, .topbar';
   let pickerState = null;
   const normName = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  function syncLayer() { document.body.classList.toggle('layer-open', !$('#sheet').hidden || !$('#picker').hidden); }
+  // Whatever is under the top layer cannot be reached by keyboard, pointer or screen reader: the page while a sheet is
+  // open, and the sheet as well while the picker is open.
+  function syncLayer() {
+    const sheetOpen = !$('#sheet').hidden, pickerOpen = !$('#picker').hidden;
+    document.body.classList.toggle('layer-open', sheetOpen || pickerOpen);
+    document.querySelectorAll(PAGE_SEL).forEach(n => { n.inert = sheetOpen || pickerOpen; });
+    $('#sheet').inert = pickerOpen;
+  }
 
   // The button that replaces a character <select>: shows the current choice, opens the picker.
-  function pickField(id, key, blank, extra = '') {
+  function pickField(id, key, blank, extra = '', domKey = key) {
     const c = id ? ci(id) : null;
     const off = c && !script().characters.includes(id);
-    return `<button type="button" class="pick-field" id="${key}-btn" data-act="pick-open" data-for="${key}" data-pickkey="${key}" aria-haspopup="dialog" ${extra}>
+    return `<button type="button" class="pick-field" id="${domKey}-btn" data-act="pick-open" data-for="${key}" data-pickkey="${domKey}" aria-haspopup="dialog" ${extra}>
       <span class="pf-ico">${icon(id)}</span>
       <span class="pf-nm ${c ? 'team-' + c.team : 'faint'}">${c ? esc(c.name) + (off ? ' <span class="faint">(not on script)</span>' : '') : esc(blank)}</span>
       <span class="pf-chev" aria-hidden="true">›</span></button>`;
@@ -224,7 +328,6 @@
       ${pk.allowClear ? `<button type="button" class="pick-none ${!pk.selected ? 'on' : ''}" data-act="pick" data-char="" aria-pressed="${!pk.selected}">${esc(pk.clearLabel || 'None')}</button>` : ''}
       <div id="picker-list">${pickerListHtml()}</div>`;
     el.hidden = false; $('#picker-backdrop').hidden = false; el.scrollTop = 0;
-    document.querySelectorAll(INERT_SEL).forEach(n => { n.inert = true; });
     syncLayer();
     el.focus({ preventScroll: true }); // the panel, not the search box, so phones do not pop up the keyboard
   }
@@ -232,11 +335,10 @@
     if (!pickerState) return;
     const key = pickerState.key; pickerState = null;
     $('#picker').hidden = true; $('#picker-backdrop').hidden = true; $('#picker').innerHTML = '';
-    document.querySelectorAll(INERT_SEL).forEach(n => { n.inert = false; });
     syncLayer();
     if (refocus) focusPick(key);
   }
-  function focusPick(key) { const t = document.querySelector(`[data-pickkey="${key}"]`); if (t) t.focus({ preventScroll: true }); }
+  function focusPick(key) { const scope = $('#sheet').hidden ? document : $('#sheet'); const t = scope.querySelector(`[data-pickkey="${key}"]`); if (t) t.focus({ preventScroll: true }); }
   $('#picker-backdrop').addEventListener('click', () => closePicker());
   $('#picker').addEventListener('toggle', (e) => { if (pickerState && !pickerState.q && e.target.classList.contains('pick-off')) pickerState.offOpen = e.target.open; }, true);
 
@@ -292,14 +394,16 @@
           <li data-pid="${p.id}">
             <span class="seat">${i + 1}</span>
             <input type="text" value="${esc(p.name)}" data-input="pname" aria-label="Player ${i + 1} name">
-            <button class="btn icon ${p.traveller ? 'primary' : ''}" data-act="toggle-trav" title="Traveller">T</button>
-            <button class="btn icon" data-act="up" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
-            <button class="btn icon" data-act="down" title="Move down" ${i === state.players.length - 1 ? 'disabled' : ''}>↓</button>
-            <button class="btn icon danger" data-act="del-player" title="Remove">✕</button>
+            <span class="seat-ctl">
+              <button class="btn icon ${p.traveller ? 'primary' : ''}" data-act="toggle-trav" title="Traveller" aria-label="Traveller: ${esc(p.name)}">T</button>
+              <button class="btn icon" data-act="up" title="Move up" aria-label="Move ${esc(p.name)} up" ${i === 0 ? 'disabled' : ''}>↑</button>
+              <button class="btn icon" data-act="down" title="Move down" aria-label="Move ${esc(p.name)} down" ${i === state.players.length - 1 ? 'disabled' : ''}>↓</button>
+              <button class="btn icon danger" data-act="del-player" title="Remove" aria-label="Remove ${esc(p.name)}">✕</button>
+            </span>
           </li>`).join('')}
       </ol>
       <div class="row" style="margin-top:10px">
-        <input type="text" id="new-player" class="grow" placeholder="Add a player…" style="flex:1 1 160px">
+        <input type="text" id="new-player" class="grow" placeholder="Add a player…" aria-label="New player name" style="flex:1 1 160px">
         <button class="btn primary" data-act="add-player">Add</button>
       </div>
       <p class="faint">Tap <span class="kbd">T</span> to mark a Traveller. Travellers aren't counted in the setup numbers.</p>
@@ -321,11 +425,11 @@
         <select id="me-sel" data-change="me"><option value="">— choose —</option>${state.players.map(p => `<option value="${p.id}" ${state.meId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div><label class="field" for="mychar-btn">Your character (what the Storyteller showed you)</label>
         ${pickField(state.myChar, 'mychar', '— not told yet —')}</div>
-      <div><label class="field">Your alignment</label>
-        <div class="seg"><button data-act="align" data-v="good" class="${state.myAlign === 'good' ? 'on' : ''}">Good</button><button data-act="align" data-v="evil" class="${state.myAlign === 'evil' ? 'on' : ''}">Evil</button></div></div>
+      <div>${grpLbl('align', 'Your alignment')}
+        <div class="seg" ${grp('align')}><button data-act="align" data-v="good" class="${state.myAlign === 'good' ? 'on' : ''}">Good</button><button data-act="align" data-v="evil" class="${state.myAlign === 'evil' ? 'on' : ''}">Evil</button></div></div>
       ${myInfo ? `<div class="tip info"><b>${esc(myInfo.name)}</b>: ${esc(myInfo.ability)}<br><span class="muted">${esc(myInfo.play || (TEAM_TIPS[myInfo.team] || {}).play || '')}</span></div>` : ''}
-      ${isEvilMe() ? `<div><label class="field">Your evil team (the Storyteller shows you this on night 1)</label>
-        <div class="chips">${state.players.filter(p => p.id !== state.meId).map(p => `<button class="chip-btn ${state.knownEvil.includes(p.id) ? 'on' : ''}" data-act="known-evil" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div>
+      ${isEvilMe() ? `<div>${grpLbl('evilteam', 'Your evil team (the Storyteller shows you this on night 1)')}
+        <div class="chips" ${grp('evilteam')}>${state.players.filter(p => p.id !== state.meId).map(p => `<button class="chip-btn ${state.knownEvil.includes(p.id) ? 'on' : ''}" data-act="known-evil" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div>
         <label class="field" for="demon-sel" style="margin-top:8px">Who is the Demon?</label>
         <select id="demon-sel" data-change="known-demon"><option value="">— me / unknown —</option>${state.players.filter(p => p.id !== state.meId).map(p => `<option value="${p.id}" ${state.knownDemon === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
     </div>
@@ -338,6 +442,7 @@
         <input type="file" id="game-file" accept=".json,application/json" hidden>
         <button class="btn danger" data-act="new-game">New game</button>
       </div>
+      ${storageOk ? '' : `<div class="tip warn" role="note">${esc(NOT_SAVING)}</div>`}
       <p class="faint">"New game" keeps the same players and seating but clears claims, info, deaths and votes. Everything is saved in this browser automatically.</p>
     </div>`;
   }
@@ -359,7 +464,10 @@
   function viewTown() {
     if (!state.players.length) return `<div class="card empty"><h2>No players yet</h2><p>Add the players in seating order on the Setup tab.</p><button class="btn primary" data-goto="setup">Go to setup</button></div>`;
     const N = state.players.length;
-    const wrap = Math.min(wideScreen.matches ? (window.innerWidth - 88) * 0.52 : window.innerWidth - 24, 620);
+    // How big the circle may be: the pane or screen width, and never taller than the screen when it sits in the sticky pane.
+    const sideRail = wideScreen.matches || shortLand.matches ? 88 : 0;
+    const cap = twoPaneOk() ? Math.min(620, window.innerHeight - 190) : shortLand.matches ? Math.max(260, window.innerHeight - 76) : 620;
+    const wrap = Math.min(twoPaneOk() ? (window.innerWidth - 88) * 0.52 : window.innerWidth - sideRail - 24, cap);
     const tok = Math.round(Math.min(N <= 8 ? 76 : N <= 12 ? 64 : 54, wrap * (N <= 6 ? 0.19 : N <= 8 ? 0.155 : N <= 12 ? 0.13 : 0.105)));
     const a = analysis();
     const showPct = a && !a.error && !isEvilMe();
@@ -371,23 +479,25 @@
       const claim = Engine.latestClaim(p);
       const info = claim ? ci(claim) : null;
       const pct = showPct && !p.traveller && p.id !== state.meId ? Math.round(a.players[p.id].evil * 100) : null;
-      return `<button class="token ${p.dead ? 'dead' : ''}" data-act="open-player" data-pid="${p.id}" style="left:${x}%;top:${y}%;--ring:${ringColor(p)}">
+      // The accessible name carries the same public facts as the screen: never the player's true role.
+      const aria = `${p.name}${p.id === state.meId ? ' (you)' : ''}, ${info ? 'claims ' + info.name : (p.traveller ? 'Traveller, no claim' : 'no claim')}, ${p.dead ? 'dead' + (p.deadVoteUsed ? ', ghost vote used' : ', ghost vote available') : 'alive'}${pct !== null ? `, ${pct} percent likely evil` : ''}`;
+      return `<button class="token ${p.dead ? 'dead' : ''}" data-act="open-player" data-pid="${p.id}" style="left:${x}%;top:${y}%;--ring:${ringColor(p)}" aria-label="${esc(aria)}" aria-haspopup="dialog">
         <span class="disc">${icon(claim)}${p.dead ? '<span class="shroud">DEAD</span>' : ''}</span>
         ${p.id === state.meId ? '<span class="me">YOU</span>' : ''}
         ${pct !== null ? `<span class="badge">${pct}%</span>` : ''}
-        ${p.dead && !p.deadVoteUsed ? '<span class="ghost" title="Ghost vote available"></span>' : ''}
+        ${p.dead && !p.deadVoteUsed ? '<span class="ghost" aria-hidden="true"></span>' : ''}
         <span class="nm">${esc(p.name)}</span>
         <span class="cl ${info ? 'team-' + info.team : ''}">${info ? esc(info.name) : (p.traveller ? 'Traveller' : '—')}</span>
       </button>`;
     }).join('');
     const alive = Engine.aliveCount(state);
     return `
-      <div class="town-wrap" style="--tok:${tok}px">
+      <div class="town-wrap ${tok < 40 ? 'dense' : ''}" style="--tok:${tok}px;max-width:${cap}px">
         <div class="town-center">
           <div class="big">${Engine.phaseLabel(state.phase)}</div>
           <div class="muted">${alive} alive · ${Engine.votesNeeded(state)} votes to execute</div>
           <div class="row" style="justify-content:center;margin-top:8px">
-            <button class="btn small" data-act="prev-phase" title="Back one phase">‹</button>
+            <button class="btn small" data-act="prev-phase" title="Back one phase" aria-label="Back one phase">‹</button>
             <button class="btn small primary" data-act="next-phase">${state.phase.kind === 'night' ? 'Start day' : 'Start night'}</button>
           </div>
         </div>
@@ -418,13 +528,13 @@
           ${info ? `<div class="tip info" style="margin-top:8px"><b class="team-${info.team}">${esc(info.name)}</b>: ${esc(info.ability)}<br><span class="muted"><b>${isMe ? 'How others will judge this claim:' : 'If they claim this:'}</b> ${esc(info.spot || (TEAM_TIPS[info.team] || {}).spot || '')}</span></div>` : ''}
           ${promptsHtml(p)}
         </div>
-        ${isMe ? '' : `<div><label class="field">Your read</label>
-          <div class="seg even">${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
+        ${isMe ? '' : `<div>${grpLbl('read', 'Your read')}
+          <div class="seg even" ${grp('read')}>${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
           <div class="faint">Your read nudges the analysis slightly. Logged info counts for much more.</div></div>
-        <div><label class="field">Lock (only if you're certain)</label>
-          <div class="seg">${[['', 'None'], ['good', 'Confirmed good'], ['evil', 'Confirmed evil'], ['demon', 'Is the Demon'], ['notdemon', 'Not the Demon']].map(([v, l]) => `<button data-act="lock" data-pid="${p.id}" data-v="${v}" class="${(p.lock || '') === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>`}
-        <div><label class="field">Status</label>
-          <div class="seg">
+        <div>${grpLbl('lock', "Lock (only if you're certain)")}
+          <div class="seg" ${grp('lock')}>${[['', 'None'], ['good', 'Confirmed good'], ['evil', 'Confirmed evil'], ['demon', 'Is the Demon'], ['notdemon', 'Not the Demon']].map(([v, l]) => `<button data-act="lock" data-pid="${p.id}" data-v="${v}" class="${(p.lock || '') === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>`}
+        <div>${grpLbl('status', 'Status')}
+          <div class="seg" ${grp('status')}>
             <button data-act="death" data-pid="${p.id}" data-v="" class="${!p.dead ? 'on' : ''}">Alive</button>
             <button data-act="death" data-pid="${p.id}" data-v="night" class="${p.dead && p.death && p.death.how === 'night' ? 'on' : ''}">Died at night</button>
             <button data-act="death" data-pid="${p.id}" data-v="execution" class="${p.dead && p.death && p.death.how === 'execution' ? 'on' : ''}">Executed</button>
@@ -495,7 +605,7 @@
       if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
       groups[groups.length - 1].items.push(it);
     });
-    return `<div class="timeline"><label class="field">Timeline</label>${groups.map(g => `<div class="tl-phase"><div class="tl-label">${esc(g.label)}</div>${g.items.map(it => timelineItem(it, pid)).join('')}</div>`).join('')}</div>`;
+    return `<div class="timeline"><div class="field">Timeline</div>${groups.map(g => `<div class="tl-phase"><div class="tl-label">${esc(g.label)}</div>${g.items.map(it => timelineItem(it, pid)).join('')}</div>`).join('')}</div>`;
   }
 
   let noteDraft = null;
@@ -519,13 +629,13 @@
       <h2>${d.plan ? (d.id ? 'Edit planned line' : 'Plan a story line') : `${d.id ? 'Edit' : 'Add to'} ${isMe ? 'your' : esc(pname(d.player)) + '\'s'} timeline`}</h2>
       <div class="stack">
         ${d.plan ? '<div class="faint">Private until you mark it as told.</div>' : ''}
-        ${isMe && !d.plan ? `<div><label class="field">Is this what really happened?</label>
-          <div class="seg"><button data-act="note-story" data-v="true" class="${d.story === 'true' ? 'on' : ''}">Private truth</button><button data-act="note-story" data-v="public" class="${d.story === 'public' ? 'on' : ''}">What I told the table</button></div></div>` : ''}
+        ${isMe && !d.plan ? `<div>${grpLbl('nstory', 'Is this what really happened?')}
+          <div class="seg" ${grp('nstory')}><button data-act="note-story" data-v="true" class="${d.story === 'true' ? 'on' : ''}">Private truth</button><button data-act="note-story" data-v="public" class="${d.story === 'public' ? 'on' : ''}">What I told the table</button></div></div>` : ''}
         <div><label class="field" for="note-when">When</label><select id="note-when" data-note="when">${phases.map(ph => `<option value="${ph.kind}:${ph.n}" ${d.when.kind === ph.kind && d.when.n === ph.n ? 'selected' : ''}>${Engine.phaseLabel(ph)}</option>`).join('')}</select></div>
-        <div><label class="field">${isMe ? 'What kind of note?' : 'What are they claiming?'}</label>
-          <div class="seg">${NOTE_KINDS.map(([v, l]) => `<button data-act="note-kind" data-v="${v}" class="${d.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
-        <div><label class="field">Which players? <span class="faint">(optional)</span></label>
-          <div class="chips">${state.players.filter(p => p.id !== d.player).map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.targets.includes(p.id) ? 'on' : ''}" data-act="note-target" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div></div>
+        <div>${grpLbl('nkind', isMe ? 'What kind of note?' : 'What are they claiming?')}
+          <div class="seg" ${grp('nkind')}>${NOTE_KINDS.map(([v, l]) => `<button data-act="note-kind" data-v="${v}" class="${d.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+        <div>${grpLbl('nwho', 'Which players? <span class="faint">(optional)</span>')}
+          <div class="chips" ${grp('nwho')}>${state.players.filter(p => p.id !== d.player).map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.targets.includes(p.id) ? 'on' : ''}" data-act="note-target" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div></div>
         <div><label class="field" for="note-btn">Character <span class="faint">(optional)</span></label>${pickField(d.char, 'note', '— none —')}</div>
         <div><label class="field" for="note-text">Details</label><textarea id="note-text" data-note="text" placeholder="e.g. Protected Ben last night, saw a 1 on the Empath…">${esc(d.text)}</textarea></div>
         <div class="row"><button class="btn primary" data-act="save-note">Save</button>${d.id ? '<button class="btn danger" data-act="del-note">Delete</button>' : '<button class="btn" data-act="save-note" data-more="1">Save &amp; add another</button>'}</div>
@@ -589,7 +699,7 @@
       <div class="card stack">
         <div class="row between"><h2 style="margin:0">Bluff Studio</h2><span class="story private">Private</span></div>
         <div class="truth-card"><span class="faint">Your true role</span><div><b class="${real ? 'team-' + real.team : ''}">${real ? esc(real.name) : 'Not set'}</b> <span class="muted">· ${isEvilMe() ? 'Evil' : 'Good'}</span></div></div>
-        <div><label class="field" for="claim-btn">What you are telling the table</label>${pickField(cover, 'claim', '— no claim —', `data-pid="${m.id}"`)}</div>
+        <div><label class="field" for="cover-btn">What you are telling the table</label>${pickField(cover, 'claim', '— no claim —', `data-pid="${m.id}"`, 'cover')}</div>
         ${coverInfo && check.isBluff ? `<div class="faint"><b class="team-${coverInfo.team}">${esc(coverInfo.name)}</b>: ${esc(coverInfo.ability)}</div>` : ''}
       </div>
       ${coachCardHtml(check, cover, coverInfo, sc)}
@@ -724,7 +834,7 @@
   }
   function promptsHtml(p) {
     const info = promptsFor(p); if (!info) return '';
-    return `<div class="prompts"><label class="field">Quick log${info.bluff ? ' <span class="faint">· saved as what you told the table</span>' : ''}</label>
+    return `<div class="prompts" ${grp('quick')}>${grpLbl('quick', 'Quick log' + (info.bluff ? ' <span class="faint">· saved as what you told the table</span>' : ''))}
       ${info.items.map((it, i) => `<button type="button" class="prompt" data-act="prompt" data-pid="${p.id}" data-i="${i}"><span>${esc(info.isMe ? it.you : it.them)}</span><span aria-hidden="true">›</span></button>`).join('')}</div>`;
   }
   function runPrompt(pid, i) {
@@ -796,14 +906,14 @@
           <div class="grow"><label class="field" for="ev-when">When</label><select id="ev-when" data-draft="when">${phases.map(ph => `<option value="${ph.kind}:${ph.n}" ${draft.when.kind === ph.kind && draft.when.n === ph.n ? 'selected' : ''}>${Engine.phaseLabel(ph)}</option>`).join('')}</select></div>
         </div>
         <div><label class="field" for="ev-tpl">Kind of info</label><select id="ev-tpl" data-draft="template">${relevant.map(tplOpt).join('')}${others.length ? `<optgroup label="Other scripts">${others.map(tplOpt).join('')}</optgroup>` : ''}</select></div>
-        ${f.players ? `<div><label class="field">${f.players === 1 ? 'Which player?' : f.players === 2 ? 'Which two players?' : 'Which players?'}</label>
-          <div class="chips">${state.players.map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${draft.players.includes(p.id) ? 'on' : ''}" data-act="draft-player" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div>
+        ${f.players ? `<div>${grpLbl('ewho', f.players === 1 ? 'Which player?' : f.players === 2 ? 'Which two players?' : 'Which players?')}
+          <div class="chips" ${grp('ewho')}>${state.players.map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${draft.players.includes(p.id) ? 'on' : ''}" data-act="draft-player" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div>
           ${t.auto === 'neighbours' ? '<div class="faint">Filled in with the source\'s alive neighbours. Adjust if needed.</div>' : ''}</div>` : ''}
-        ${f.n ? `<div><label class="field">Number</label><div class="seg">${Array.from({ length: f.n[1] - f.n[0] + 1 }, (_, k) => f.n[0] + k).map(v => `<button data-act="draft-n" data-v="${v}" class="${draft.n === v ? 'on' : ''}">${v}</button>`).join('')}</div></div>` : ''}
+        ${f.n ? `<div>${grpLbl('en', 'Number')}<div class="seg" ${grp('en')}>${Array.from({ length: f.n[1] - f.n[0] + 1 }, (_, k) => f.n[0] + k).map(v => `<button data-act="draft-n" data-v="${v}" class="${draft.n === v ? 'on' : ''}">${v}</button>`).join('')}</div></div>` : ''}
         ${f.char ? `<div><label class="field" for="ev-btn">Character</label>${pickField(draft.char, 'ev', '— choose —')}</div>` : ''}
-        ${f.yes ? `<div><label class="field">Result</label><div class="seg"><button data-act="draft-yes" data-v="1" class="${draft.yes ? 'on' : ''}">${f.yes[0]}</button><button data-act="draft-yes" data-v="0" class="${!draft.yes ? 'on' : ''}">${f.yes[1]}</button></div></div>` : ''}
-        ${f.same ? `<div><label class="field">Result</label><div class="seg"><button data-act="draft-same" data-v="1" class="${draft.same ? 'on' : ''}">Same alignment</button><button data-act="draft-same" data-v="0" class="${!draft.same ? 'on' : ''}">Different</button></div></div>` : ''}
-        ${f.evil ? `<div><label class="field">Alignment</label><div class="seg"><button data-act="draft-evil" data-v="0" class="${!draft.evil ? 'on' : ''}">Good</button><button data-act="draft-evil" data-v="1" class="${draft.evil ? 'on' : ''}">Evil</button></div></div>` : ''}
+        ${f.yes ? `<div>${grpLbl('eyes', 'Result')}<div class="seg" ${grp('eyes')}><button data-act="draft-yes" data-v="1" class="${draft.yes ? 'on' : ''}">${f.yes[0]}</button><button data-act="draft-yes" data-v="0" class="${!draft.yes ? 'on' : ''}">${f.yes[1]}</button></div></div>` : ''}
+        ${f.same ? `<div>${grpLbl('esame', 'Result')}<div class="seg" ${grp('esame')}><button data-act="draft-same" data-v="1" class="${draft.same ? 'on' : ''}">Same alignment</button><button data-act="draft-same" data-v="0" class="${!draft.same ? 'on' : ''}">Different</button></div></div>` : ''}
+        ${f.evil ? `<div>${grpLbl('eevil', 'Alignment')}<div class="seg" ${grp('eevil')}><button data-act="draft-evil" data-v="0" class="${!draft.evil ? 'on' : ''}">Good</button><button data-act="draft-evil" data-v="1" class="${draft.evil ? 'on' : ''}">Evil</button></div></div>` : ''}
         ${f.day ? `<div><label class="field" for="ev-day">Which day?</label><input type="number" id="ev-day" min="1" value="${draft.day}" data-draft="day" style="width:90px">
           <div class="faint">Uses the nominations and votes you logged on the Votes tab for that day.</div></div>` : ''}
         <div><label class="field" for="ev-text">Note (optional)</label><textarea id="ev-text" data-draft="text" placeholder="Exact wording, context…">${esc(draft.text)}</textarea></div>
@@ -836,7 +946,7 @@
   function entryHtml(ev) {
     const srcP = player(ev.source);
     const srcClaim = srcP ? Engine.latestClaim(srcP) : null;
-    return `<div class="entry" data-act="edit-ev" data-eid="${ev.id}" style="cursor:pointer">
+    return `<div class="entry" data-act="edit-ev" data-eid="${ev.id}" role="button" tabindex="0" style="cursor:pointer">
       <div class="meta">${esc(Engine.phaseLabel(ev.when))} · from ${esc(pname(ev.source))}${srcClaim ? ' (' + esc(ci(srcClaim).name) + ')' : ''}</div>
       <div>${describe(ev)}</div>${ev.text ? `<div class="muted" style="font-size:.88em">${esc(ev.text)}</div>` : ''}</div>`;
   }
@@ -866,9 +976,9 @@
         <p style="margin:0">${alive} alive → <b>${Engine.votesNeeded(state)} votes</b> needed to put someone on the block (and more than any other nominee today).</p>
       </div>
       <div class="card">
-        <h3>Who died?</h3>
+        <h3 id="g-died">Who died?</h3>
         <p class="faint" style="margin-top:0">Tap players who died last night. Executions are recorded from the nominations below.</p>
-        <div class="chips">${state.players.map(p => `<button class="chip-btn ${p.dead ? 'on' : ''}" data-act="quick-death" data-pid="${p.id}">${esc(p.name)}${p.dead ? ' ✝' : ''}</button>`).join('')}</div>
+        <div class="chips" role="group" aria-labelledby="g-died">${state.players.map(p => `<button class="chip-btn ${p.dead ? 'on' : ''}" data-act="quick-death" data-pid="${p.id}">${esc(p.name)}${p.dead ? ' <span aria-hidden="true">✝</span><span class="sr-only"> (dead)</span>' : ''}</button>`).join('')}</div>
         ${deadToday.length ? `<p class="faint">${deadToday.map(p => `${esc(p.name)} (${p.death.how === 'execution' ? 'executed' : p.death.how === 'night' ? 'night death' : 'died'})`).join(', ')}</p>` : ''}
       </div>
       <div class="card">
@@ -878,7 +988,8 @@
           <table class="simple"><tr><th>Nominator</th><th>Nominee</th><th>Votes</th><th></th></tr>
           ${state.noms.filter(n => n.day === d).map(n => `<tr data-act="edit-nom" data-nid="${n.id}" style="cursor:pointer">
             <td>${esc(pname(n.nominator))}</td><td>${esc(pname(n.nominee))}${n.executed ? ' <b class="team-demon">✝ executed</b>' : ''}</td>
-            <td>${n.votes}${n.voters && n.voters.length ? `<div class="faint">${n.voters.map(pname).map(esc).join(', ')}</div>` : ''}</td><td>›</td></tr>`).join('')}
+            <td>${n.votes}${n.voters && n.voters.length ? `<div class="faint">${n.voters.map(pname).map(esc).join(', ')}</div>` : ''}</td>
+            <td><button type="button" class="btn icon" data-act="edit-nom" data-nid="${n.id}" aria-label="${esc('Edit nomination: ' + pname(n.nominator) + ' nominated ' + pname(n.nominee))}"><span aria-hidden="true">›</span></button></td></tr>`).join('')}
           </table>`).join('') : '<div class="empty">No nominations logged yet.</div>'}
       </div>`;
   }
@@ -894,9 +1005,9 @@
           <div class="grow"><label class="field" for="nom-a">Nominator</label><select id="nom-a" data-nom="nominator"><option value="">—</option>${(d.id ? state.players : alive).map(p => `<option value="${p.id}" ${d.nominator === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
           <div class="grow"><label class="field" for="nom-b">Nominee</label><select id="nom-b" data-nom="nominee"><option value="">—</option>${state.players.map(p => `<option value="${p.id}" ${d.nominee === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
         </div>
-        <div><label class="field">Who voted? <span class="faint">(dead players use their ghost vote)</span></label>
-          <div class="chips">${state.players.map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.voters.includes(p.id) ? 'on' : ''}" data-act="nom-voter" data-pid="${p.id}" ${p.dead && p.deadVoteUsed && !d.voters.includes(p.id) ? 'disabled title="Ghost vote already used"' : ''}>${esc(p.name)}</button>`).join('')}</div>
-          <div class="row" style="margin-top:6px"><span class="faint">Total votes:</span> <input type="number" min="0" id="nom-votes" data-nom="votes" value="${d.votes}" style="width:80px">
+        <div>${grpLbl('nvoters', 'Who voted? <span class="faint">(dead players use their ghost vote)</span>')}
+          <div class="chips" ${grp('nvoters')}>${state.players.map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.voters.includes(p.id) ? 'on' : ''}" data-act="nom-voter" data-pid="${p.id}" ${p.dead && p.deadVoteUsed && !d.voters.includes(p.id) ? 'disabled title="Ghost vote already used"' : ''}>${esc(p.name)}</button>`).join('')}</div>
+          <div class="row" style="margin-top:6px"><label class="faint" for="nom-votes">Total votes:</label> <input type="number" min="0" id="nom-votes" data-nom="votes" value="${d.votes}" style="width:80px">
           <span class="faint">Needed: ${Engine.votesNeeded(state)}</span></div></div>
         <div><button class="chip-btn ${d.executed ? 'on' : ''}" data-act="nom-exec">${d.executed ? '✝ Executed' : 'Mark as executed'}</button></div>
         <div class="row"><button class="btn primary" data-act="save-nom">Save</button>${d.id ? '<button class="btn danger" data-act="del-nom">Delete</button>' : ''}</div>
@@ -925,7 +1036,7 @@
         ${a.vortox !== null && a.vortox !== undefined ? `<div class="tip ${a.vortox >= 0.4 ? 'warn' : 'info'}"><b>Vortox chance: ${Math.round(a.vortox * 100)}%.</b> ${a.vortox > 0 ? 'If it is in play, all Townsfolk info is false.' : 'Ruled out for now.'}</div>` : ''}
         ${ranked.map(r => {
           const claim = Engine.claimOf(state, r.p);
-          return `<div class="suspect" data-act="open-player" data-pid="${r.p.id}" style="cursor:pointer">
+          return `<div class="suspect" data-act="open-player" data-pid="${r.p.id}" role="button" tabindex="0" aria-haspopup="dialog" aria-label="${esc(`${r.p.name}: ${Math.round(r.evil * 100)} percent evil, ${Math.round(r.demon * 100)} percent Demon. Open`)}" style="cursor:pointer">
             <div class="row between"><span><b>${esc(r.p.name)}</b> ${claim ? `<span class="team-${ci(claim).team}">${esc(ci(claim).name)}</span>` : '<span class="faint">no claim</span>'}${r.p.dead ? ' <span class="faint">✝</span>' : ''}</span>
               <span><span class="pct" style="color:${ringColor(r.p)}">${Math.round(r.evil * 100)}% evil</span> <span class="faint">· ${Math.round(r.demon * 100)}% Demon</span></span></div>
             ${bar(r.evil, ringColor(r.p))}
@@ -965,7 +1076,7 @@
     return `
       ${mine ? `<h2>Your character</h2>${charCard(mine, true, 'mine:')}` : ''}
       <h2>${esc(sc.name)}</h2>
-      <input type="text" class="search" placeholder="Search characters…" value="${esc(guideFilter)}" data-input="guide-filter">
+      <input type="text" class="search" placeholder="Search characters…" aria-label="Search characters" value="${esc(guideFilter)}" data-input="guide-filter">
       ${TEAMS.filter(t => chars.some(c => c.team === t)).map(t => `<h3 class="team-${t}" style="margin-top:14px">${TEAM_LABEL[t]}</h3>${chars.filter(c => c.team === t).map(c => charCard(c)).join('')}`).join('')}
       <h2 style="margin-top:20px">Rules & tips</h2>
       ${RULES.map(r => `<details class="rule"><summary>${esc(r.title)}</summary><ul>${r.body.map(b => `<li>${b}</li>`).join('')}</ul></details>`).join('')}
@@ -977,16 +1088,65 @@
 
   // ── Sheet helpers ────────────────────────────────────────────────────────
   let sheetKind = null;
+  let activator = null;      // the control last tapped; it gets focus back when the sheet closes
+  let sheetOpener = null;    // { el, key } captured when the sheet opens
+  let shownKind = null;      // which sheet is on screen, to tell a refresh from a move to another form
   function openSheet(html) {
-    const s = $('#sheet'); const keep = s.hidden ? 0 : s.scrollTop;
-    s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false; s.scrollTop = keep; syncLayer();
+    const s = $('#sheet'), wasOpen = !s.hidden;
+    if (!wasOpen) {
+      const el = activator && activator.isConnected ? activator : document.activeElement;
+      sheetOpener = { el, key: focusKey(el) };
+    }
+    const sameForm = wasOpen && shownKind === sheetKind;
+    const restore = sameForm ? holdFocus(s) : () => {};
+    const keep = sameForm ? s.scrollTop : 0;
+    s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false;
+    const h = s.querySelector('h2'); if (h) { h.id = 'sheet-title'; s.setAttribute('aria-labelledby', 'sheet-title'); }
+    syncPressed(s);
+    s.scrollTop = keep; shownKind = sheetKind; syncLayer();
+    restore();
+    // A new sheet, or a different form in it, starts at the top with the dialog itself focused; a refresh keeps the user's place.
+    if (!s.contains(document.activeElement) || document.activeElement === s) s.focus({ preventScroll: true });
   }
-  function closeSheet() { closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; noteReturn = false; syncLayer(); render(); }
+  function closeSheet() {
+    closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; $('#sheet').removeAttribute('aria-labelledby');
+    sheetKind = null; shownKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; noteReturn = false; syncLayer(); render();
+    const o = sheetOpener; sheetOpener = null; activator = null;
+    const back = o && ((o.el && o.el.isConnected ? o.el : null) || (o.key ? document.querySelector(o.key) : null));
+    if (back) back.focus({ preventScroll: true });
+  }
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (pickerState) { closePicker(); e.preventDefault(); } // only the picker; the form underneath keeps its draft
     else if (!$('#sheet').hidden) closeSheet();
+  });
+  // Keyboard focus stays inside the top layer (the picker, else the sheet): Tab wraps around.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const layer = pickerState ? $('#picker') : (!$('#sheet').hidden ? $('#sheet') : null); if (!layer) return;
+    const items = [...layer.querySelectorAll(FOCUSABLE)].filter(shown);
+    if (!items.length) { e.preventDefault(); layer.focus(); return; }
+    const first = items[0], last = items[items.length - 1], a = document.activeElement;
+    if (e.shiftKey && (a === first || a === layer || !layer.contains(a))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (a === last || !layer.contains(a))) { e.preventDefault(); first.focus(); }
+  });
+  // Rows that act like buttons answer Enter and Space. Only the row itself counts, so a real button inside one (like
+  // "Mark as told") is left to do its own job and nothing fires twice.
+  document.addEventListener('keydown', (e) => {
+    if ((e.key !== 'Enter' && e.key !== ' ') || e.repeat) return;
+    const t = e.target;
+    if (t && t.matches && t.matches('[role="button"][data-act]') && t.localName !== 'button') { e.preventDefault(); t.click(); }
+  });
+  // On a short screen (on-screen keyboard open) keep the field being edited in view, clear of the nav and the sheet's edges.
+  document.addEventListener('focusin', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('input:not([type=checkbox]):not([type=radio]):not([type=file]), textarea, select')) return;
+    setTimeout(() => {
+      if (document.activeElement !== t) return;
+      const r = t.getBoundingClientRect(), vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      if (r.top < 64 || r.bottom > vh - 16) t.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }, 250);
   });
   function refreshSheet() {
     if (sheetKind && sheetKind.startsWith('player:')) sheetPlayer(sheetKind.slice(7));
@@ -1067,6 +1227,7 @@
     const g = e.target.closest('[data-goto]');
     if (g) { uiTab = g.dataset.goto; if ($('#sheet').hidden) render(); else closeSheet(); return; }
     const el = e.target.closest('[data-act]'); if (!el) return;
+    activator = el;
     const act = el.dataset.act; const pid = el.dataset.pid || (el.closest('[data-pid]') || {}).dataset?.pid;
     const p = pid ? player(pid) : null;
     switch (act) {
@@ -1134,7 +1295,7 @@
       case 'prompt': runPrompt(pid, Number(el.dataset.i)); break;
       case 'pick-open': {
         const f = el.dataset.for;
-        if (f === 'claim' && p) openPicker({ key: f, for: f, pid, selected: Engine.latestClaim(p) || '', allowClear: true, clearLabel: 'No claim', exclude: [pid],
+        if (f === 'claim' && p) openPicker({ key: el.dataset.pickkey, for: f, pid, selected: Engine.latestClaim(p) || '', allowClear: true, clearLabel: 'No claim', exclude: [pid],
           title: pid === state.meId ? 'What you are telling the table' : `What does ${p.name} claim?` });
         else if (f === 'mychar') openPicker({ key: f, for: f, selected: state.myChar || '', allowClear: true, clearLabel: 'Not told yet', exclude: [state.meId], title: 'Your character' });
         else if (f === 'note' && noteDraft) openPicker({ key: f, for: f, selected: noteDraft.char || '', allowClear: true, clearLabel: 'No character', exclude: [noteDraft.player], title: 'Which character?' });
@@ -1160,8 +1321,8 @@
       case 'draft-evil': draft.evil = el.dataset.v === '1'; sheetEvidence(); break;
       case 'save-draft': {
         const t = TEMPLATES.find(x => x.id === draft.template);
-        if (t.fields.players && t.fields.players <= 2 && draft.players.length !== t.fields.players) { alert(`Pick ${t.fields.players} player${t.fields.players > 1 ? 's' : ''}.`); return; }
-        if (t.fields.char && !draft.char) { alert('Pick a character.'); return; }
+        if (t.fields.players && t.fields.players <= 2 && draft.players.length !== t.fields.players) { toast(`Pick ${t.fields.players} player${t.fields.players > 1 ? 's' : ''}.`, false, 3200); return; }
+        if (t.fields.char && !draft.char) { toast('Pick a character.', false, 3200); return; }
         const ev = { ...draft, type: t.type, ...(t.fixed || {}) };
         record('Info saved', () => { if (!ev.id) { ev.id = uid(); state.evidence.push(ev); } else state.evidence = state.evidence.map(x => (x.id === ev.id ? ev : x)); });
         save();
@@ -1251,7 +1412,7 @@
       case 'nom-exec': nomDraft.executed = !nomDraft.executed; sheetNom(); break;
       case 'save-nom': {
         const d = nomDraft;
-        if (!d.nominator || !d.nominee) { alert('Pick the nominator and the nominee.'); return; }
+        if (!d.nominator || !d.nominee) { toast('Pick the nominator and the nominee.', false, 3200); return; }
         record('Nomination saved', () => {
           const old = d.id ? state.noms.find(n => n.id === d.id) : null;
           // Only one execution per day: moving it brings the previous player back.
@@ -1297,7 +1458,7 @@
       else if (k === 'day') draft.day = Number(el.value) || 1;
       else if (k === 'template') { draft.template = el.value; applyAuto(); }
       else if (k === 'source') { draft.source = el.value; const t = templateForSource(el.value); if (!draft.id && t) draft.template = t.id; applyAuto(); }
-      else draft[k] = el.value;
+      else { draft[k] = el.value; if (k === 'text') return; } // typed text is already kept by the input handler; re-drawing would steal focus
       sheetEvidence();
     }
     else if (el.dataset.note && noteDraft) {
@@ -1309,19 +1470,40 @@
       const k = el.dataset.nom; nomDraft[k] = k === 'votes' ? Number(el.value) : el.value;
     }
     else if (el.id === 'script-file' && el.files[0]) {
-      el.files[0].text().then(t => {
-        try { state.customScript = parseCustomScript(JSON.parse(t)); state.scriptId = 'custom'; commit(); toast(`Loaded ${state.customScript.name}`); }
-        catch (err) { alert('Could not read that script: ' + err.message); }
-      });
+      const file = el.files[0];
+      file.text().then(t => {
+        const sc = parseCustomScript(JSON.parse(t));
+        // Try it first; if the app cannot draw with it, the game stays exactly as it was.
+        const prevScript = state.customScript, prevId = state.scriptId;
+        dry = true;
+        try { state.customScript = sc; state.scriptId = 'custom'; render(); }
+        catch (err) { state.customScript = prevScript; state.scriptId = prevId; dry = false; analysisKeyMemo = null; render(); throw err; }
+        dry = false; commit(); toast(`Loaded ${sc.name}`);
+      }).catch(err => toast('Could not read that script: ' + (err && err.message || 'unreadable file'), false, 4000))
+        .finally(() => { el.value = ''; }); // so the same file can be chosen again
     }
     else if (el.id === 'game-file' && el.files[0]) {
-      el.files[0].text().then(t => {
-        try { const s = JSON.parse(t); if (!Array.isArray(s.players)) throw new Error('not a game file'); const next = Engine.sanitizeGame(s, freshState());
-          record('Game loaded', () => { state = next; }); uiTab = state.players.length ? 'town' : 'setup'; commit(); }
-        catch (err) { alert('Could not load that file: ' + err.message); }
-      });
+      const file = el.files[0];
+      file.text().then(t => {
+        const s = JSON.parse(t);
+        if (!s || typeof s !== 'object' || !Array.isArray(s.players)) throw new Error('this is not a saved game');
+        const next = Engine.sanitizeGame(s, freshState());
+        if (s.players.length && !next.players.length) throw new Error('it has no readable players');
+        loadGame(next);
+      }).catch(err => toast('Could not load that file: ' + (err && err.message || 'unreadable file') + '. Your current game was not changed.', false, 4500))
+        .finally(() => { el.value = ''; });
     }
   });
+
+  // Replace the game with a loaded one. It is drawn once without saving; if that fails nothing has changed.
+  function loadGame(next) {
+    const prev = state, tab = uiTab, tabNext = next.players.length ? 'town' : 'setup';
+    dry = true;
+    try { state = next; uiTab = tabNext; render(); }
+    catch (err) { state = prev; uiTab = tab; dry = false; analysisKeyMemo = null; render(); throw err; }
+    state = prev; uiTab = tab; dry = false; analysisKeyMemo = null;
+    record('Game loaded', () => { state = next; }); uiTab = tabNext; commit();
+  }
 
   document.addEventListener('input', (e) => {
     const el = e.target;
@@ -1342,7 +1524,16 @@
   document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'new-player') { e.preventDefault(); document.querySelector('[data-act="add-player"]').click(); } });
 
   // Re-render the page underneath the sheet when it closes; while open, keep data fresh.
-  let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (uiTab === 'town' || document.body.classList.contains('two-pane')) render(); }, 150); });
+  let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (uiTab === 'town' || document.body.classList.contains('two-pane') || (twoPaneOk() && state.players.length > 0 && !['setup', 'guide'].includes(uiTab))) render(); }, 150); });
   window.__companion = { get state() { return state; }, get undoDepth() { return undoStack.length; }, Engine };
-  render();
+  try { render(); }
+  catch (err) {
+    // A saved game that parsed but cannot be drawn: set it aside and start fresh instead of showing a blank page.
+    let raw = null; try { raw = localStorage.getItem(KEY); } catch { /* storage unavailable */ }
+    const kept = raw !== null && backupCorrupt(raw);
+    state = freshState(); uiTab = 'setup'; analysisKeyMemo = null; analysisCache = { key: null, value: null };
+    startupNote = 'Your saved game could not be opened, so this is a fresh start.' + (kept ? ' The old data was kept in this browser as a backup.' : '');
+    render();
+  }
+  if (startupNote) toast(startupNote, false, 8000);
 })();

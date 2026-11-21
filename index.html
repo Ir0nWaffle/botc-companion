@@ -19,7 +19,8 @@
 <header class="topbar">
   <div class="brand">
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke="#F2B84B" stroke-width="2"/><path d="M12 6v6l4 3" stroke="#FFD27A" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.5" fill="#F0625D"/></svg>
-    <span>Clocktower<span class="brand-name"> Companion</span></span>
+    <h1 class="sr-only">Clocktower Companion</h1>
+    <span aria-hidden="true">Clocktower<span class="brand-name"> Companion</span></span>
   </div>
   <div class="top-actions">
     <div class="phase" id="phase-chip"></div>
@@ -44,9 +45,11 @@
 </nav>
 
 <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
-<section class="sheet" id="sheet" hidden role="dialog" aria-modal="true"></section>
+<section class="sheet" id="sheet" hidden role="dialog" aria-modal="true" tabindex="-1"></section>
 <div class="picker-backdrop" id="picker-backdrop" hidden></div>
 <section class="picker" id="picker" hidden role="dialog" aria-modal="true" aria-labelledby="picker-title" tabindex="-1"></section>
+
+<div id="live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script src="js/icons.js"></script>
 <script src="js/extra-characters.js"></script>
@@ -55,7 +58,7 @@
 <script src="js/engine.js"></script>
 <script src="js/app.js"></script>
 <script>
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 </script>
 </body>
 </html>
