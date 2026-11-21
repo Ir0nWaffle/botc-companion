@@ -46,18 +46,35 @@
   }
 
   // ── Shell ────────────────────────────────────────────────────────────────
+  const wideScreen = window.matchMedia('(min-width: 900px)');
+  const PHASE_ICON = {
+    night: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>',
+    day: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="currentColor"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg>',
+  };
+
   function render() {
-    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === uiTab));
+    document.querySelectorAll('button[data-tab]').forEach((b) => {
+      const on = b.dataset.tab === uiTab;
+      b.classList.toggle('active', on);
+      if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
     const ph = state.phase;
     $('#phase-chip').innerHTML = state.players.length
-      ? `<span class="chip ${ph.kind}">${ph.kind === 'night' ? '☾' : '☀'} ${Engine.phaseLabel(ph)}</span><button class="btn small" data-act="next-phase" title="Advance to the next phase">Next ›</button>`
+      ? `<span class="chip ${ph.kind}">${PHASE_ICON[ph.kind]} ${Engine.phaseLabel(ph)}</span><button class="btn small" data-act="next-phase" title="Advance to the next phase">Next ›</button>`
       : '';
-    const v = $('#view');
-    v.innerHTML = ({ setup: viewSetup, town: viewTown, info: viewInfo, days: viewDays, read: viewRead, guide: viewGuide })[uiTab]();
+    // On wide screens the town stays visible beside the active panel.
+    const twoPane = wideScreen.matches && state.players.length > 0 && !['setup', 'guide'].includes(uiTab);
+    const pane = $('#town-pane');
+    pane.hidden = !twoPane;
+    pane.innerHTML = twoPane ? viewTown() : '';
+    document.body.classList.toggle('two-pane', twoPane);
+    const panel = twoPane && uiTab === 'town' ? 'read' : uiTab;
+    $('#view').innerHTML = ({ setup: viewSetup, town: viewTown, info: viewInfo, days: viewDays, read: viewRead, guide: viewGuide })[panel]();
     state.tab = uiTab; save();
   }
+  wideScreen.addEventListener('change', () => render());
 
-  document.getElementById('tabs').addEventListener('click', (e) => {
+  document.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]'); if (!b) return;
     uiTab = b.dataset.tab; render(); window.scrollTo(0, 0);
   });
@@ -177,7 +194,7 @@
     // blend blue (good) → grey → red (evil)
     const t = Math.max(0, Math.min(1, e));
     const lerp = (x, y, k) => Math.round(x + (y - x) * k);
-    const [c1, c2] = t < a.prior ? [[92, 138, 163], [138, 128, 112]] : [[138, 128, 112], [214, 64, 52]];
+    const [c1, c2] = t < a.prior ? [[110, 168, 254], [127, 136, 153]] : [[127, 136, 153], [240, 98, 93]];
     const k = t < a.prior ? t / a.prior : (t - a.prior) / (1 - a.prior);
     return `rgb(${lerp(c1[0], c2[0], k)},${lerp(c1[1], c2[1], k)},${lerp(c1[2], c2[2], k)})`;
   }
@@ -185,7 +202,7 @@
   function viewTown() {
     if (!state.players.length) return `<div class="card empty"><h2>No players yet</h2><p>Add the players in seating order on the Setup tab.</p><button class="btn primary" data-goto="setup">Go to setup</button></div>`;
     const N = state.players.length;
-    const wrap = Math.min(window.innerWidth - 24, 620);
+    const wrap = Math.min(wideScreen.matches ? (window.innerWidth - 88) * 0.52 : window.innerWidth - 24, 620);
     const tok = Math.round(Math.min(N <= 8 ? 76 : N <= 12 ? 64 : 54, wrap * (N <= 6 ? 0.19 : N <= 8 ? 0.155 : N <= 12 ? 0.13 : 0.105)));
     const a = analysis();
     const showPct = a && !a.error && !isEvilMe();
@@ -219,7 +236,7 @@
         </div>
         ${tokens}
       </div>
-      ${showPct ? `<div class="legend"><span><i style="background:#5c8aa3"></i>looks good</span><span><i style="background:#8a8070"></i>unknown</span><span><i style="background:#d64034"></i>looks evil</span><span><i style="background:#e8e2d0"></i>ghost vote left</span></div>` : ''}
+      ${showPct ? `<div class="legend"><span><i style="background:#6EA8FE"></i>looks good</span><span><i style="background:#7F8899"></i>unknown</span><span><i style="background:#F0625D"></i>looks evil</span><span><i style="background:#E9EDF5"></i>ghost vote left</span></div>` : ''}
       <p class="faint" style="text-align:center">Tap a player to record their claim, death, your read on them, or info they shared.</p>`;
   }
 
@@ -244,7 +261,7 @@
           ${info ? `<div class="tip info" style="margin-top:8px"><b class="team-${info.team}">${esc(info.name)}</b>: ${esc(info.ability)}<br><span class="muted"><b>${isMe ? 'How others will judge this claim:' : 'If they claim this:'}</b> ${esc(info.spot || (TEAM_TIPS[info.team] || {}).spot || '')}</span></div>` : ''}
         </div>
         ${isMe ? '' : `<div><label class="field">Your read</label>
-          <div class="seg">${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
+          <div class="seg even">${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
           <div class="faint">Your read nudges the analysis slightly. Logged info counts for much more.</div></div>
         <div><label class="field">Lock (only if you're certain)</label>
           <div class="seg">${[['', 'None'], ['good', 'Confirmed good'], ['evil', 'Confirmed evil'], ['demon', 'Is the Demon'], ['notdemon', 'Not the Demon']].map(([v, l]) => `<button data-act="lock" data-pid="${p.id}" data-v="${v}" class="${(p.lock || '') === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>`}
@@ -883,7 +900,7 @@
   document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'new-player') { e.preventDefault(); document.querySelector('[data-act="add-player"]').click(); } });
 
   // Re-render the page underneath the sheet when it closes; while open, keep data fresh.
-  let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (uiTab === 'town') render(); }, 150); });
+  let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (uiTab === 'town' || document.body.classList.contains('two-pane')) render(); }, 150); });
   window.__companion = { get state() { return state; }, Engine };
   render();
 })();

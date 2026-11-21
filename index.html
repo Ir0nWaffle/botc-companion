@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#13100E">
+<meta name="theme-color" content="#090B10">
 <title>Clocktower Companion</title>
 <meta name="description" content="A player's notebook for Blood on the Clocktower: track claims, info, votes and deaths, and get help working out who is lying.">
 <link rel="manifest" href="manifest.webmanifest">
@@ -17,19 +17,29 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="brand-mark">◷</span> Clocktower<span class="brand-name"> Companion</span></div>
-  <div class="phase" id="phase-chip"></div>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke="#F2B84B" stroke-width="2"/><path d="M12 6v6l4 3" stroke="#FFD27A" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.5" fill="#F0625D"/></svg>
+    <span>Clocktower<span class="brand-name"> Companion</span></span>
+  </div>
+  <div class="top-actions">
+    <div class="phase" id="phase-chip"></div>
+    <button class="icon-btn" data-tab="setup" aria-label="Game setup" title="Game setup">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>
+    </button>
+  </div>
 </header>
 
-<main id="view" aria-live="polite"></main>
+<div class="shell">
+  <aside id="town-pane" aria-label="Town" hidden></aside>
+  <main id="view"></main>
+</div>
 
-<nav class="tabs" id="tabs">
-  <button data-tab="setup"><span class="ti">⚙</span><span>Setup</span></button>
-  <button data-tab="town"><span class="ti">◯</span><span>Town</span></button>
-  <button data-tab="info"><span class="ti">✎</span><span>Info</span></button>
-  <button data-tab="days"><span class="ti">⚖</span><span>Votes</span></button>
-  <button data-tab="read"><span class="ti">⚲</span><span>Who's lying?</span></button>
-  <button data-tab="guide"><span class="ti">☰</span><span>Guide</span></button>
+<nav class="tabs" id="tabs" aria-label="Main">
+  <button data-tab="town"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><circle cx="12" cy="4.5" r="2"/><circle cx="19" cy="9.5" r="2"/><circle cx="16.5" cy="18" r="2"/><circle cx="7.5" cy="18" r="2"/><circle cx="5" cy="9.5" r="2"/></svg><span>Town</span></button>
+  <button data-tab="info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l4 4v14H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M9 12h6M9 16h6M9 8h2"/></svg><span>Info</span></button>
+  <button data-tab="days"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 11 3 3 5-6"/><path d="M5 3h14v14l-3 4H8l-3-4V3Z"/></svg><span>Votes</span></button>
+  <button data-tab="read"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.4-4.4M11 8v3.5"/><circle cx="11" cy="14.2" r=".4" fill="currentColor"/></svg><span>Suspects</span></button>
+  <button data-tab="guide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6.5C10 5 7.5 4.5 4 4.8v14c3.5-.3 6 .2 8 1.7 2-1.5 4.5-2 8-1.7v-14c-3.5-.3-6 .2-8 1.7ZM12 6.5v14"/></svg><span>Guide</span></button>
 </nav>
 
 <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
