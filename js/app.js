@@ -15,7 +15,7 @@
   let uiTab = state.players.length ? (state.tab === 'setup' ? 'town' : state.tab) : 'setup';
   let analysisCache = { key: null, value: null };
 
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} }
+  function save() { dropStaleUndo(); try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} }
   function commit() { save(); render(); }
 
   const script = () => (state.scriptId === 'custom' && state.customScript) ? state.customScript : (SCRIPTS[state.scriptId] || SCRIPTS['trouble-brewing']);
@@ -40,9 +40,62 @@
     return analysisCache.value;
   }
 
-  function toast(msg) {
-    const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t);
-    setTimeout(() => t.remove(), 1800);
+  // One toast at a time. A toast with an Undo button stays for 6 seconds.
+  let toastTimer = null;
+  function hideToast() { clearTimeout(toastTimer); document.querySelectorAll('.toast').forEach(t => t.remove()); }
+  function toast(msg, canUndo = false) {
+    hideToast();
+    const t = document.createElement('div'); t.className = 'toast' + (canUndo ? ' has-undo' : ''); t.setAttribute('role', 'status');
+    const m = document.createElement('span'); m.className = 'toast-msg'; m.textContent = msg; t.appendChild(m);
+    if (canUndo) { const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-undo'; b.dataset.act = 'undo'; b.textContent = 'Undo'; t.appendChild(b); }
+    document.body.appendChild(t);
+    toastTimer = setTimeout(() => t.remove(), canUndo ? 6000 : 1800);
+  }
+
+  // ── Undo ─────────────────────────────────────────────────────────────────
+  // In-memory only: a bounded stack of JSON snapshots, kept outside `state` so it never reaches saves or exports.
+  const UNDO_MAX = 30;
+  const undoStack = [];
+  let undoBase = null; // the game as it stood after the last undoable change
+  const gameKey = () => JSON.stringify({ ...state, tab: null });
+  // Restoring a snapshot would erase edits made since (typed notes, renamed players), so those end the undo history.
+  function dropStaleUndo() {
+    if (!undoStack.length || gameKey() === undoBase) return;
+    undoStack.length = 0; undoBase = null;
+    if (document.querySelector('.toast .toast-undo')) hideToast();
+  }
+  // Run a meaningful change; remember the exact prior state and offer Undo. Returns false if nothing changed.
+  function record(msg, fn) {
+    const before = JSON.stringify(state);
+    fn();
+    if (JSON.stringify(state) === before) return false;
+    undoStack.push(before); if (undoStack.length > UNDO_MAX) undoStack.shift();
+    undoBase = gameKey();
+    toast(typeof msg === 'function' ? msg() : msg, true);
+    return true;
+  }
+  function undo() {
+    const snap = undoStack.pop(); if (!snap) return;
+    state = JSON.parse(snap);
+    undoBase = gameKey();
+    closePicker(false);
+    save();
+    // Keep an open sheet only if what it shows still exists; otherwise drop it and its draft.
+    const ok = (id) => !!player(id);
+    let keep = true;
+    if (sheetKind && sheetKind.startsWith('player:')) keep = ok(sheetKind.slice(7));
+    else if (sheetKind === 'note') {
+      keep = !!noteDraft && ok(noteDraft.player) && (!noteDraft.id || state.notes.some(n => n.id === noteDraft.id));
+      if (keep) noteDraft.targets = noteDraft.targets.filter(ok);
+    } else if (sheetKind === 'ev') {
+      keep = !!draft && (draft.source === 'st' || ok(draft.source)) && (!draft.id || state.evidence.some(e => e.id === draft.id));
+      if (keep) draft.players = draft.players.filter(ok);
+    } else if (sheetKind === 'nom') {
+      keep = !!nomDraft && (!nomDraft.id || state.noms.some(n => n.id === nomDraft.id));
+      if (keep) { nomDraft.voters = nomDraft.voters.filter(ok); if (!ok(nomDraft.nominator)) nomDraft.nominator = ''; if (!ok(nomDraft.nominee)) nomDraft.nominee = ''; }
+    }
+    if (sheetKind && !keep) closeSheet(); else { render(); refreshSheet(); }
+    toast('Undone', undoStack.length > 0);
   }
 
   // ── Shell ────────────────────────────────────────────────────────────────
@@ -80,14 +133,16 @@
   });
 
   function nextPhase() {
-    const ph = state.phase;
-    state.phase = ph.kind === 'night' ? { kind: 'day', n: ph.n } : { kind: 'night', n: ph.n + 1 };
-    commit(); toast(Engine.phaseLabel(state.phase));
+    record(() => 'Now ' + Engine.phaseLabel(state.phase), () => {
+      const ph = state.phase;
+      state.phase = ph.kind === 'night' ? { kind: 'day', n: ph.n } : { kind: 'night', n: ph.n + 1 };
+    });
+    commit();
   }
   function prevPhase() {
     const ph = state.phase;
     if (ph.kind === 'night' && ph.n === 1) return;
-    state.phase = ph.kind === 'day' ? { kind: 'night', n: ph.n } : { kind: 'day', n: ph.n - 1 };
+    record(() => 'Back to ' + Engine.phaseLabel(state.phase), () => { state.phase = ph.kind === 'day' ? { kind: 'night', n: ph.n } : { kind: 'day', n: ph.n - 1 }; });
     commit();
   }
 
@@ -97,18 +152,98 @@
     if (state.customScript) opts.push(`<option value="custom" ${state.scriptId === 'custom' ? 'selected' : ''}>${esc(state.customScript.name)} (custom)</option>`);
     return opts.join('');
   }
-  function charOptions(selected, { blank = '— none —', teams = null } = {}) {
-    const sc = script();
-    const groups = {};
-    sc.characters.forEach(id => { const c = ci(id); if (teams && !teams.includes(c.team)) return; (groups[c.team] = groups[c.team] || []).push(c); });
-    let html = blank !== null ? `<option value="">${blank}</option>` : '';
-    for (const t of TEAMS) if (groups[t]) {
-      html += `<optgroup label="${TEAM_LABEL[t]}">` + groups[t].map(c => `<option value="${c.id}" ${selected === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('') + '</optgroup>';
-    }
-    // Claims that aren't on the script (bluffs, travellers) stay selectable.
-    if (selected && !sc.characters.includes(selected)) html += `<option value="${esc(selected)}" selected>${esc(ci(selected).name)} (not on script)</option>`;
-    html += `<optgroup label="Not on this script">` + Object.entries(CHARACTERS).filter(([id]) => !sc.characters.includes(id) && id !== selected).map(([id, c]) => `<option value="${id}">${esc(c.name)}</option>`).join('') + '</optgroup>';
-    return html;
+  // ── Character picker ─────────────────────────────────────────────────────
+  // One reusable layer over whatever is open. It never touches the sheet underneath, so drafts survive.
+  const INERT_SEL = '#sheet, #view, #town-pane, .tabs, .topbar';
+  let pickerState = null;
+  const normName = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  function syncLayer() { document.body.classList.toggle('layer-open', !$('#sheet').hidden || !$('#picker').hidden); }
+
+  // The button that replaces a character <select>: shows the current choice, opens the picker.
+  function pickField(id, key, blank, extra = '') {
+    const c = id ? ci(id) : null;
+    const off = c && !script().characters.includes(id);
+    return `<button type="button" class="pick-field" id="${key}-btn" data-act="pick-open" data-for="${key}" data-pickkey="${key}" aria-haspopup="dialog" ${extra}>
+      <span class="pf-ico">${icon(id)}</span>
+      <span class="pf-nm ${c ? 'team-' + c.team : 'faint'}">${c ? esc(c.name) + (off ? ' <span class="faint">(not on script)</span>' : '') : esc(blank)}</span>
+      <span class="pf-chev" aria-hidden="true">›</span></button>`;
+  }
+
+  function pickerListHtml() {
+    const pk = pickerState, sc = script(), q = normName(pk.q);
+    const cell = (c) => {
+      const on = c.id === pk.selected;
+      const by = state.players.filter(p => !pk.exclude.includes(p.id) && Engine.latestClaim(p) === c.id).map(p => p.name);
+      const label = c.name + (by.length ? `, already claimed by ${by.join(', ')}` : '') + (on ? ', selected' : '');
+      return `<button type="button" class="pick ${on ? 'on' : ''}" data-act="pick" data-char="${esc(c.id)}" aria-pressed="${on}" aria-label="${esc(label)}">
+        <span class="pk-ico">${icon(c.id)}</span><span class="pk-nm team-${c.team}">${esc(c.name)}</span>
+        ${by.length ? `<span class="pk-dup" title="${esc('Already claimed by ' + by.join(', '))}">${esc(by[0])}${by.length > 1 ? ' +' + (by.length - 1) : ''}</span>` : ''}</button>`;
+    };
+    const groupHtml = (chars) => {
+      const g = {};
+      chars.filter(c => !q || normName(c.name).includes(q)).forEach(c => { (g[c.team] = g[c.team] || []).push(c); });
+      let n = 0, html = '';
+      for (const t of TEAMS) if (g[t]) { n += g[t].length; html += `<h3 class="team-${t}">${TEAM_LABEL[t]}</h3><div class="pick-grid">${g[t].map(cell).join('')}</div>`; }
+      return { html, n };
+    };
+    const on = groupHtml(sc.characters.map(ci));
+    const offIds = Object.keys(CHARACTERS).filter(id => !sc.characters.includes(id));
+    // A claim already outside the script and the base list (custom script leftovers) stays selectable.
+    if (pk.selected && !sc.characters.includes(pk.selected) && !offIds.includes(pk.selected)) offIds.push(pk.selected);
+    const off = groupHtml(offIds.map(ci));
+    const selOff = !!pk.selected && offIds.includes(pk.selected);
+    const open = pk.offOpen || selOff || (q && off.n > 0);
+    return (on.n ? on.html : '') +
+      (!on.n && !off.n ? `<p class="faint">No characters match "${esc(pk.q)}".</p>` : '') +
+      `<details class="pick-off" ${open ? 'open' : ''}><summary>Not on this script <span class="faint">(${off.n})</span></summary>${off.html || '<p class="faint">No matches.</p>'}</details>`;
+  }
+
+  function openPicker(cfg) {
+    pickerState = { q: '', offOpen: false, exclude: [], ...cfg };
+    const pk = pickerState, el = $('#picker');
+    el.innerHTML = `<div class="grab"></div><button type="button" class="btn small close" data-act="picker-close">Cancel</button>
+      <h2 id="picker-title">${esc(pk.title)}</h2>
+      <input type="text" id="picker-q" class="search" placeholder="Search characters…" aria-label="Search characters" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" data-input="picker-q">
+      ${pk.allowClear ? `<button type="button" class="pick-none ${!pk.selected ? 'on' : ''}" data-act="pick" data-char="" aria-pressed="${!pk.selected}">${esc(pk.clearLabel || 'None')}</button>` : ''}
+      <div id="picker-list">${pickerListHtml()}</div>`;
+    el.hidden = false; $('#picker-backdrop').hidden = false; el.scrollTop = 0;
+    document.querySelectorAll(INERT_SEL).forEach(n => { n.inert = true; });
+    syncLayer();
+    el.focus({ preventScroll: true }); // the panel, not the search box, so phones do not pop up the keyboard
+  }
+  function closePicker(refocus = true) {
+    if (!pickerState) return;
+    const key = pickerState.key; pickerState = null;
+    $('#picker').hidden = true; $('#picker-backdrop').hidden = true; $('#picker').innerHTML = '';
+    document.querySelectorAll(INERT_SEL).forEach(n => { n.inert = false; });
+    syncLayer();
+    if (refocus) focusPick(key);
+  }
+  function focusPick(key) { const t = document.querySelector(`[data-pickkey="${key}"]`); if (t) t.focus({ preventScroll: true }); }
+  $('#picker-backdrop').addEventListener('click', () => closePicker());
+  $('#picker').addEventListener('toggle', (e) => { if (pickerState && !pickerState.q && e.target.classList.contains('pick-off')) pickerState.offOpen = e.target.open; }, true);
+
+  function applyPick(v) {
+    const pk = pickerState; if (!pk) return;
+    closePicker(false);
+    if (pk.for === 'claim') {
+      const p = player(pk.pid);
+      if (p && (v || '') !== (Engine.latestClaim(p) || '')) {
+        record(v ? `${p.name}: ${ci(v).name}` : `${p.name}: claim cleared`, () => { if (v) p.claims.push({ char: v, when: { ...state.phase } }); else p.claims = []; });
+        commit(); refreshSheet();
+      }
+    } else if (pk.for === 'mychar') {
+      if (v !== state.myChar) {
+        record(v ? `You are the ${ci(v).name}` : 'Your character cleared', () => {
+          state.myChar = v;
+          const info = v ? ci(v) : null;
+          if (info) state.myAlign = Engine.isEvilTeam(info.team) ? 'evil' : 'good';
+        });
+        commit();
+      }
+    } else if (pk.for === 'note' && noteDraft) { noteDraft.char = v; sheetNote(); }
+    else if (pk.for === 'ev' && draft) { draft.char = v; sheetEvidence(); }
+    focusPick(pk.key);
   }
 
   function viewSetup() {
@@ -162,8 +297,8 @@
       <h2>You</h2>
       <div><label class="field" for="me-sel">Which player are you?</label>
         <select id="me-sel" data-change="me"><option value="">— choose —</option>${state.players.map(p => `<option value="${p.id}" ${state.meId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
-      <div><label class="field" for="mychar-sel">Your character (what the Storyteller showed you)</label>
-        <select id="mychar-sel" data-change="mychar">${charOptions(state.myChar, { blank: '— not told yet —' })}</select></div>
+      <div><label class="field" for="mychar-btn">Your character (what the Storyteller showed you)</label>
+        ${pickField(state.myChar, 'mychar', '— not told yet —')}</div>
       <div><label class="field">Your alignment</label>
         <div class="seg"><button data-act="align" data-v="good" class="${state.myAlign === 'good' ? 'on' : ''}">Good</button><button data-act="align" data-v="evil" class="${state.myAlign === 'evil' ? 'on' : ''}">Evil</button></div></div>
       ${myInfo ? `<div class="tip info"><b>${esc(myInfo.name)}</b>: ${esc(myInfo.ability)}<br><span class="muted">${esc(myInfo.play || (TEAM_TIPS[myInfo.team] || {}).play || '')}</span></div>` : ''}
@@ -255,10 +390,11 @@
         ${res.reasons.map(r => `<div class="reason"><span class="${r.delta > 0 ? 'up' : 'down'}">${r.delta > 0 ? '▲' : '▼'} ${Math.abs(Math.round(r.delta * 100))}</span> ${esc(r.label)}</div>`).join('')}` : ''}
       <div class="stack" style="margin-top:12px">
         ${isMe ? trueRoleCard(p) : ''}
-        <div><label class="field" for="claim-sel">${isMe ? 'What you are telling the table' : 'What they claim to be'}</label>
-          <select id="claim-sel" data-change="claim" data-pid="${p.id}">${charOptions(Engine.latestClaim(p), { blank: '— no claim —' })}</select>
+        <div><label class="field" for="claim-btn">${isMe ? 'What you are telling the table' : 'What they claim to be'}</label>
+          ${pickField(Engine.latestClaim(p), 'claim', '— no claim —', `data-pid="${p.id}"`)}
           ${p.claims.length > 1 ? `<div class="faint" style="margin-top:4px">Claim history: ${p.claims.map(c => `${esc(ci(c.char).name)} (${Engine.phaseLabel(c.when)})`).join(' → ')}. <b>Changing claims is a red flag</b>, unless a Barber, Pit-Hag or madness explains it.</div>` : ''}
           ${info ? `<div class="tip info" style="margin-top:8px"><b class="team-${info.team}">${esc(info.name)}</b>: ${esc(info.ability)}<br><span class="muted"><b>${isMe ? 'How others will judge this claim:' : 'If they claim this:'}</b> ${esc(info.spot || (TEAM_TIPS[info.team] || {}).spot || '')}</span></div>` : ''}
+          ${promptsHtml(p)}
         </div>
         ${isMe ? '' : `<div><label class="field">Your read</label>
           <div class="seg even">${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
@@ -362,12 +498,12 @@
           <div class="seg">${NOTE_KINDS.map(([v, l]) => `<button data-act="note-kind" data-v="${v}" class="${d.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
         <div><label class="field">Which players? <span class="faint">(optional)</span></label>
           <div class="chips">${state.players.filter(p => p.id !== d.player).map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.targets.includes(p.id) ? 'on' : ''}" data-act="note-target" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div></div>
-        <div><label class="field" for="note-char">Character <span class="faint">(optional)</span></label><select id="note-char" data-note="char">${charOptions(d.char, { blank: '— none —' })}</select></div>
+        <div><label class="field" for="note-btn">Character <span class="faint">(optional)</span></label>${pickField(d.char, 'note', '— none —')}</div>
         <div><label class="field" for="note-text">Details</label><textarea id="note-text" data-note="text" placeholder="e.g. Protected Ben last night, saw a 1 on the Empath…">${esc(d.text)}</textarea></div>
-        <div class="row"><button class="btn primary" data-act="save-note">Save</button>${d.id ? '<button class="btn danger" data-act="del-note">Delete</button>' : ''}</div>
+        <div class="row"><button class="btn primary" data-act="save-note">Save</button>${d.id ? '<button class="btn danger" data-act="del-note">Delete</button>' : '<button class="btn" data-act="save-note" data-more="1">Save &amp; add another</button>'}</div>
       </div>`);
   }
-  function backToPlayer(pid) { noteDraft = null; sheetKind = 'player:' + pid; sheetPlayer(pid); }
+  function backToPlayer(pid) { noteDraft = null; draft = null; evReturn = null; sheetKind = 'player:' + pid; sheetPlayer(pid); }
 
   // ── Info log ─────────────────────────────────────────────────────────────
   const TEMPLATES = [
@@ -388,6 +524,111 @@
     { id: 'among', label: 'The Demon is / isn\'t one of these', chars: ['exorcist'], type: 'demonAmong', fields: { players: 99, yes: ['Is among them', 'Is not among them'] } },
     { id: 'note', label: 'Just a note (no logic)', chars: ['savant', 'artist', 'mathematician', 'chambermaid'], type: 'note', fields: {} },
   ];
+  // Quick prompts per role: what you would actually ask or record. `tpl` opens the structured info form (it feeds
+  // the solver); otherwise a timeline note opens with `kind` and a starter `text`. For a templated role, `kind`/`text`
+  // are the note used instead when you are bluffing (a fake story must never become evidence).
+  // `mine` prompts only show on your own sheet. Abilities follow js/data.js.
+  const Q = (them, you, o) => ({ them, you, ...o });
+  const ROLE_PROMPTS = {
+    // Trouble Brewing
+    washerwoman: [Q('Which two players were they shown, and as what?', 'Which two players were you shown, and as what?', { tpl: 'ping', kind: 'learned', text: 'Washerwoman ping: ' })],
+    librarian: [Q('Which two players were they shown, and as what?', 'Which two players were you shown, and as what?', { tpl: 'ping', kind: 'learned', text: 'Librarian ping: ' }),
+      Q('Were they told there are no Outsiders?', 'Were you told there are no Outsiders?', { kind: 'learned', text: 'Learned there are no Outsiders in play' })],
+    investigator: [Q('Which two players were they shown, and as what?', 'Which two players were you shown, and as what?', { tpl: 'ping', kind: 'learned', text: 'Investigator ping: ' })],
+    chef: [Q('What number did they get?', 'What number did you get?', { tpl: 'chef', kind: 'learned', text: 'Chef number: ' })],
+    empath: [Q('What number did they get?', 'What number did you get?', { tpl: 'empath', kind: 'learned', text: 'Empath number: ' })],
+    fortuneteller: [Q('Who did they check, and what result?', 'Who did you check, and what result?', { tpl: 'fortune', kind: 'learned', text: 'Fortune Teller checked: ' })],
+    undertaker: [Q('Who did they see executed?', 'Who did you see executed?', { tpl: 'ischar', kind: 'learned', text: 'Saw executed: ' })],
+    monk: [Q('Who did they protect?', 'Who did you protect?', { kind: 'did', text: 'Protected' })],
+    ravenkeeper: [Q('Who did they look at, and what did they see?', 'Who did you look at, and what did you see?', { tpl: 'ischar', kind: 'learned', text: 'Ravenkeeper saw: ' })],
+    virgin: [Q('Who nominated them, and what happened?', 'Who nominated you, and what happened?', { kind: 'learned', text: 'Nominated by' })],
+    slayer: [Q('Who did they shoot?', 'Who did you shoot?', { tpl: 'slayer', kind: 'did', text: 'Shot' })],
+    soldier: [Q('Did they survive a Demon attack?', 'Did you survive a Demon attack?', { kind: 'said', text: 'Survived an attack' })],
+    mayor: [Q('Did a night death bounce off them?', 'Did a night death bounce off you?', { kind: 'said', text: 'Someone else died instead' })],
+    butler: [Q('Who did they choose as master?', 'Who did you choose as master?', { kind: 'did', text: 'Chose as master' })],
+    poisoner: [Q('', 'Who did you poison?', { mine: 1, kind: 'did', text: 'Poisoned' })],
+    imp: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    // Bad Moon Rising
+    grandmother: [Q('Who is their grandchild, and what character?', 'Who is your grandchild, and what character?', { tpl: 'ischar', kind: 'learned', text: 'Grandchild: ' })],
+    sailor: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose' })],
+    chambermaid: [Q('Who did they check, and how many woke?', 'Who did you check, and how many woke?', { tpl: 'note', kind: 'learned', text: 'Chambermaid: checked ___, number who woke: ' })],
+    exorcist: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose' })],
+    innkeeper: [Q('Which two players did they pick?', 'Which two players did you pick?', { kind: 'did', text: 'Picked two' })],
+    gambler: [Q('Who did they guess, and as what?', 'Who did you guess, and as what?', { kind: 'did', text: 'Guessed' })],
+    gossip: [Q('What was their public statement?', 'What was your public statement?', { kind: 'said', text: 'Statement: ' })],
+    courtier: [Q('Which character did they choose?', 'Which character did you choose?', { kind: 'did', text: 'Made drunk' })],
+    professor: [Q('Who did they try to revive?', 'Who did you try to revive?', { kind: 'did', text: 'Chose to revive' })],
+    moonchild: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose after dying' })],
+    lunatic: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose' })],
+    godfather: [Q('', 'Who did you kill?', { mine: 1, kind: 'did', text: 'Killed' })],
+    devilsadvocate: [Q('', 'Who did you protect?', { mine: 1, kind: 'did', text: 'Protected from execution' })],
+    assassin: [Q('', 'Who did you kill?', { mine: 1, kind: 'did', text: 'Killed' })],
+    zombuul: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    pukka: [Q('', 'Who did you poison?', { mine: 1, kind: 'did', text: 'Poisoned' })],
+    shabaloth: [Q('', 'Which two players did you choose?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    po: [Q('', 'Who did you choose?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    // Sects & Violets
+    clockmaker: [Q('What number did they get?', 'What number did you get?', { tpl: 'clock', kind: 'learned', text: 'Clockmaker number: ' })],
+    dreamer: [Q('Who did they check, and which two characters?', 'Who did you check, and which two characters?', { kind: 'learned', text: 'Dreamer checked ___, saw: ' })],
+    snakecharmer: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose' })],
+    mathematician: [Q('What number did they get?', 'What number did you get?', { tpl: 'note', kind: 'learned', text: 'Mathematician number: ' })],
+    flowergirl: [Q('Did the Demon vote today?', 'Did the Demon vote today?', { tpl: 'flower', kind: 'learned', text: 'Flowergirl: the Demon voted? ' })],
+    towncrier: [Q('Did a Minion nominate today?', 'Did a Minion nominate today?', { tpl: 'crier', kind: 'learned', text: 'Town Crier: a Minion nominated? ' })],
+    oracle: [Q('How many dead players are evil?', 'How many dead players are evil?', { tpl: 'oracle', kind: 'learned', text: 'Oracle number: ' })],
+    savant: [Q('What two things were they told?', 'What two things were you told?', { tpl: 'note', kind: 'learned', text: 'Savant was told: ' })],
+    seamstress: [Q('Who did they check, and same or different?', 'Who did you check, and same or different?', { tpl: 'seam', kind: 'learned', text: 'Seamstress checked: ' })],
+    philosopher: [Q('Which character did they choose?', 'Which character did you choose?', { kind: 'did', text: 'Chose the' })],
+    artist: [Q('What did they ask, and what was the answer?', 'What did you ask, and what was the answer?', { tpl: 'note', kind: 'learned', text: 'Asked: ' })],
+    juggler: [Q('What did they guess, and how many were right?', 'What did you guess, and how many were right?', { kind: 'said', text: 'Juggler guesses: ' })],
+    sage: [Q('Which two players were they told?', 'Which two players were you told?', { tpl: 'sage', kind: 'learned', text: 'Sage was told: ' })],
+    klutz: [Q('Who did they choose?', 'Who did you choose?', { kind: 'did', text: 'Chose after dying' })],
+    witch: [Q('', 'Who did you curse?', { mine: 1, kind: 'did', text: 'Cursed' })],
+    cerenovus: [Q('', 'Who did you make mad, as what?', { mine: 1, kind: 'did', text: 'Made mad' })],
+    pithag: [Q('', 'Who did you change, into what?', { mine: 1, kind: 'did', text: 'Changed' })],
+    fanggu: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    vigormortis: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    nodashii: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+    vortox: [Q('', 'Who did you choose to kill?', { mine: 1, kind: 'did', text: 'Chose to kill' })],
+  };
+
+  // Which role the prompts on a player's sheet follow. On your own sheet they follow what you told the table
+  // when it differs from your true role (bluff), and then they only ever make public notes.
+  function promptsFor(p) {
+    const isMe = p.id === state.meId;
+    const claim = Engine.latestClaim(p);
+    let role = claim, bluff = false;
+    if (isMe) {
+      if (claim && claim !== state.myChar) bluff = true;
+      else role = state.myChar || claim;
+    }
+    if (!role) return null;
+    const items = (ROLE_PROMPTS[role] || []).filter(it => !it.mine || (isMe && !bluff));
+    return items.length ? { role, bluff, isMe, items } : null;
+  }
+  function promptsHtml(p) {
+    const info = promptsFor(p); if (!info) return '';
+    return `<div class="prompts"><label class="field">Quick log${info.bluff ? ' <span class="faint">· saved as what you told the table</span>' : ''}</label>
+      ${info.items.map((it, i) => `<button type="button" class="prompt" data-act="prompt" data-pid="${p.id}" data-i="${i}"><span>${esc(info.isMe ? it.you : it.them)}</span><span aria-hidden="true">›</span></button>`).join('')}</div>`;
+  }
+  function runPrompt(pid, i) {
+    const p = player(pid), info = p && promptsFor(p), it = info && info.items[i]; if (!it) return;
+    if (it.tpl && !info.bluff) {
+      newDraft(pid, null); draft.template = it.tpl; if (it.tpl === 'note') draft.text = it.text; applyAuto();
+      openEv(pid);
+    } else {
+      noteDraft = { id: null, player: pid, when: { ...state.phase }, kind: it.kind, targets: [], char: '', text: it.text,
+        story: info.isMe ? (info.bluff ? 'public' : 'true') : 'public' };
+      sheetKind = 'note'; sheetNote();
+    }
+  }
+
+  let evReturn = null; // the player's sheet to go back to after the info form
+  function openEv(returnPid) { evReturn = returnPid && player(returnPid) ? returnPid : null; sheetKind = 'ev'; sheetEvidence(); }
+  function leaveEv() {
+    const r = evReturn; draft = null; evReturn = null;
+    if (r && player(r)) { sheetKind = 'player:' + r; sheetPlayer(r); render(); } else closeSheet();
+  }
+
   let draft = null;
 
   function aliveNeighbours(pid) {
@@ -429,7 +670,7 @@
     const tplOpt = (x) => `<option value="${x.id}" ${x.id === draft.template ? 'selected' : ''}>${esc(x.label)}</option>`;
     const phases = []; for (let n = 1; n <= Math.max(state.phase.n, 1); n++) { phases.push({ kind: 'night', n }); if (n < state.phase.n || state.phase.kind === 'day') phases.push({ kind: 'day', n }); }
     openSheet(`
-      <div class="grab"></div><button class="btn small close" data-act="close-sheet">Cancel</button>
+      <div class="grab"></div><button class="btn small close" data-act="cancel-ev">${evReturn ? 'Back' : 'Cancel'}</button>
       <h2>${draft.id ? 'Edit info' : 'Log info'}</h2>
       <div class="stack">
         <div><label class="field" for="ev-src">Who learned / said this?</label><select id="ev-src" data-draft="source">${sourceOpts}</select>
@@ -442,7 +683,7 @@
           <div class="chips">${state.players.map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${draft.players.includes(p.id) ? 'on' : ''}" data-act="draft-player" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div>
           ${t.auto === 'neighbours' ? '<div class="faint">Filled in with the source\'s alive neighbours. Adjust if needed.</div>' : ''}</div>` : ''}
         ${f.n ? `<div><label class="field">Number</label><div class="seg">${Array.from({ length: f.n[1] - f.n[0] + 1 }, (_, k) => f.n[0] + k).map(v => `<button data-act="draft-n" data-v="${v}" class="${draft.n === v ? 'on' : ''}">${v}</button>`).join('')}</div></div>` : ''}
-        ${f.char ? `<div><label class="field" for="ev-char">Character</label><select id="ev-char" data-draft="char">${charOptions(draft.char, { blank: '— choose —' })}</select></div>` : ''}
+        ${f.char ? `<div><label class="field" for="ev-btn">Character</label>${pickField(draft.char, 'ev', '— choose —')}</div>` : ''}
         ${f.yes ? `<div><label class="field">Result</label><div class="seg"><button data-act="draft-yes" data-v="1" class="${draft.yes ? 'on' : ''}">${f.yes[0]}</button><button data-act="draft-yes" data-v="0" class="${!draft.yes ? 'on' : ''}">${f.yes[1]}</button></div></div>` : ''}
         ${f.same ? `<div><label class="field">Result</label><div class="seg"><button data-act="draft-same" data-v="1" class="${draft.same ? 'on' : ''}">Same alignment</button><button data-act="draft-same" data-v="0" class="${!draft.same ? 'on' : ''}">Different</button></div></div>` : ''}
         ${f.evil ? `<div><label class="field">Alignment</label><div class="seg"><button data-act="draft-evil" data-v="0" class="${!draft.evil ? 'on' : ''}">Good</button><button data-act="draft-evil" data-v="1" class="${draft.evil ? 'on' : ''}">Evil</button></div></div>` : ''}
@@ -450,7 +691,7 @@
           <div class="faint">Uses the nominations and votes you logged on the Votes tab for that day.</div></div>` : ''}
         <div><label class="field" for="ev-text">Note (optional)</label><textarea id="ev-text" data-draft="text" placeholder="Exact wording, context…">${esc(draft.text)}</textarea></div>
         <div class="row"><button class="btn primary" data-act="save-draft">Save</button>
-          ${draft.id ? '<button class="btn danger" data-act="del-draft">Delete</button>' : ''}</div>
+          ${draft.id ? '<button class="btn danger" data-act="del-draft">Delete</button>' : '<button class="btn" data-act="save-draft" data-more="1">Save &amp; add another</button>'}</div>
       </div>`);
   }
 
@@ -619,11 +860,15 @@
   let sheetKind = null;
   function openSheet(html) {
     const s = $('#sheet'); const keep = s.hidden ? 0 : s.scrollTop;
-    s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false; s.scrollTop = keep;
+    s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false; s.scrollTop = keep; syncLayer();
   }
-  function closeSheet() { $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; render(); }
+  function closeSheet() { closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; syncLayer(); render(); }
   $('#sheet-backdrop').addEventListener('click', closeSheet);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (pickerState) { closePicker(); e.preventDefault(); } // only the picker; the form underneath keeps its draft
+    else if (!$('#sheet').hidden) closeSheet();
+  });
   function refreshSheet() {
     if (sheetKind && sheetKind.startsWith('player:')) sheetPlayer(sheetKind.slice(7));
     else if (sheetKind === 'ev') sheetEvidence();
@@ -720,12 +965,14 @@
       }
       case 'del-player': {
         if (!confirm(`Remove ${p.name}? Info that mentions them will be removed too.`)) return;
-        state.players = state.players.filter(x => x.id !== pid);
-        state.evidence = state.evidence.filter(ev => ev.source !== pid && !(ev.players || []).includes(pid));
-        state.noms = state.noms.filter(n => n.nominator !== pid && n.nominee !== pid).map(n => ({ ...n, voters: (n.voters || []).filter(v => v !== pid) }));
-        state.notes = state.notes.filter(n => n.player !== pid).map(n => ({ ...n, targets: n.targets.filter(t => t !== pid) }));
-        if (state.meId === pid) state.meId = null;
-        state.knownEvil = state.knownEvil.filter(x => x !== pid);
+        record(`Removed ${p.name}`, () => {
+          state.players = state.players.filter(x => x.id !== pid);
+          state.evidence = state.evidence.filter(ev => ev.source !== pid && !(ev.players || []).includes(pid));
+          state.noms = state.noms.filter(n => n.nominator !== pid && n.nominee !== pid).map(n => ({ ...n, voters: (n.voters || []).filter(v => v !== pid) }));
+          state.notes = state.notes.filter(n => n.player !== pid).map(n => ({ ...n, targets: n.targets.filter(t => t !== pid) }));
+          if (state.meId === pid) state.meId = null;
+          state.knownEvil = state.knownEvil.filter(x => x !== pid);
+        });
         commit(); break;
       }
       case 'up': case 'down': {
@@ -741,23 +988,42 @@
       case 'import-game': $('#game-file').click(); break;
       case 'new-game': {
         if (!confirm('Start a new game? Players and seating are kept. Claims, info, deaths and votes are cleared.')) return;
-        const keep = state.players.map(x => ({ id: x.id, name: x.name, traveller: false, claims: [], dead: false, death: null, deadVoteUsed: false, gut: 0, lock: '', notes: '' }));
-        state = Object.assign(freshState(), { players: keep, meId: state.meId, scriptId: state.scriptId, customScript: state.customScript });
+        record('New game started', () => {
+          const keep = state.players.map(x => ({ id: x.id, name: x.name, traveller: false, claims: [], dead: false, death: null, deadVoteUsed: false, gut: 0, lock: '', notes: '' }));
+          state = Object.assign(freshState(), { players: keep, meId: state.meId, scriptId: state.scriptId, customScript: state.customScript });
+        });
         uiTab = 'setup'; commit(); break;
       }
       case 'open-player': sheetKind = 'player:' + pid; sheetPlayer(pid); break;
       case 'close-sheet': closeSheet(); break;
-      case 'gut': p.gut = Number(el.dataset.v); save(); refreshSheet(); break;
-      case 'lock': p.lock = el.dataset.v; save(); refreshSheet(); break;
-      case 'death': setDeath(p, el.dataset.v); save(); refreshSheet(); break;
-      case 'ghost': p.deadVoteUsed = !p.deadVoteUsed; save(); refreshSheet(); break;
-      case 'log-from': newDraft(pid, null); sheetKind = 'ev'; sheetEvidence(); break;
-      case 'log-about': newDraft(null, pid); sheetKind = 'ev'; sheetEvidence(); break;
-      case 'new-ev': newDraft(state.meId, null); sheetKind = 'ev'; sheetEvidence(); break;
+      case 'gut': record(`${p.name}: read updated`, () => { p.gut = Number(el.dataset.v); }); save(); refreshSheet(); break;
+      case 'lock': record(`${p.name}: lock updated`, () => { p.lock = el.dataset.v; }); save(); refreshSheet(); break;
+      case 'death':
+        record(() => `${p.name}: ${p.dead ? (p.death.how === 'night' ? 'died at night' : p.death.how === 'execution' ? 'executed' : 'died') : 'alive'}`, () => setDeath(p, el.dataset.v));
+        commit(); refreshSheet(); break;
+      case 'ghost': record(() => `${p.name}: ghost vote ${p.deadVoteUsed ? 'used' : 'available'}`, () => { p.deadVoteUsed = !p.deadVoteUsed; }); save(); refreshSheet(); break;
+      case 'log-from': newDraft(pid, null); openEv(pid); break;
+      case 'log-about': newDraft(null, pid); openEv(pid); break;
+      case 'new-ev': newDraft(state.meId, null); openEv(null); break;
       case 'edit-ev': {
         const ev = state.evidence.find(x => x.id === el.dataset.eid); if (!ev) return;
-        draft = JSON.parse(JSON.stringify(ev)); sheetKind = 'ev'; sheetEvidence(); break;
+        const from = sheetKind && sheetKind.startsWith('player:') ? sheetKind.slice(7) : null;
+        draft = JSON.parse(JSON.stringify(ev)); openEv(from); break;
       }
+      case 'cancel-ev': leaveEv(); break;
+      case 'prompt': runPrompt(pid, Number(el.dataset.i)); break;
+      case 'pick-open': {
+        const f = el.dataset.for;
+        if (f === 'claim' && p) openPicker({ key: f, for: f, pid, selected: Engine.latestClaim(p) || '', allowClear: true, clearLabel: 'No claim', exclude: [pid],
+          title: pid === state.meId ? 'What you are telling the table' : `What does ${p.name} claim?` });
+        else if (f === 'mychar') openPicker({ key: f, for: f, selected: state.myChar || '', allowClear: true, clearLabel: 'Not told yet', exclude: [state.meId], title: 'Your character' });
+        else if (f === 'note' && noteDraft) openPicker({ key: f, for: f, selected: noteDraft.char || '', allowClear: true, clearLabel: 'No character', exclude: [noteDraft.player], title: 'Which character?' });
+        else if (f === 'ev' && draft) openPicker({ key: f, for: f, selected: draft.char || '', allowClear: false, title: 'Which character?' });
+        break;
+      }
+      case 'pick': applyPick(el.dataset.char); break;
+      case 'picker-close': closePicker(); break;
+      case 'undo': undo(); break;
       case 'draft-player': {
         const t = TEMPLATES.find(x => x.id === draft.template); const max = t.fields.players || 0;
         if (draft.players.includes(pid)) draft.players = draft.players.filter(x => x !== pid);
@@ -773,14 +1039,20 @@
         if (t.fields.players && t.fields.players <= 2 && draft.players.length !== t.fields.players) { alert(`Pick ${t.fields.players} player${t.fields.players > 1 ? 's' : ''}.`); return; }
         if (t.fields.char && !draft.char) { alert('Pick a character.'); return; }
         const ev = { ...draft, type: t.type, ...(t.fixed || {}) };
-        if (!ev.id) { ev.id = uid(); state.evidence.push(ev); } else state.evidence = state.evidence.map(x => (x.id === ev.id ? ev : x));
-        save(); closeSheet(); toast('Info saved'); break;
+        record('Info saved', () => { if (!ev.id) { ev.id = uid(); state.evidence.push(ev); } else state.evidence = state.evidence.map(x => (x.id === ev.id ? ev : x)); });
+        save();
+        if (el.dataset.more === '1') {
+          // Same source, kind and time; everything else starts blank.
+          const prev = draft;
+          draft = { id: null, source: prev.source, when: { ...prev.when }, template: prev.template, players: [], n: 0, char: '', yes: true, same: true, evil: true, day: prev.day, text: '' };
+          applyAuto(); sheetEvidence();
+        } else leaveEv();
+        break;
       }
-      case 'del-draft': state.evidence = state.evidence.filter(x => x.id !== draft.id); save(); closeSheet(); break;
-      case 'quick-death': {
-        setDeath(p, p.dead ? '' : 'night');
+      case 'del-draft': record('Info deleted', () => { state.evidence = state.evidence.filter(x => x.id !== draft.id); }); save(); leaveEv(); break;
+      case 'quick-death':
+        record(() => `${p.name}: ${p.dead ? 'died at night' : 'alive'}`, () => setDeath(p, p.dead ? '' : 'night'));
         commit(); break;
-      }
       case 'new-note':
         noteDraft = { id: null, player: pid, when: { ...state.phase }, kind: pid === state.meId ? 'did' : 'said', targets: [], char: '', text: '', story: pid === state.meId ? 'true' : 'public' };
         sheetKind = 'note'; sheetNote(); break;
@@ -798,12 +1070,17 @@
         const d = noteDraft;
         d.text = d.text.trim();
         if (!d.text && !d.char && !d.targets.length) { toast('Add a player, character or details'); return; }
-        if (!d.id) { d.id = uid(); state.notes.push(d); } else state.notes = state.notes.map(n => (n.id === d.id ? d : n));
-        save(); backToPlayer(d.player); toast('Added to timeline'); break;
+        record('Added to timeline', () => { if (!d.id) { d.id = uid(); state.notes.push(d); } else state.notes = state.notes.map(n => (n.id === d.id ? d : n)); });
+        save();
+        if (el.dataset.more === '1') {
+          noteDraft = { id: null, player: d.player, when: { ...d.when }, kind: d.kind, targets: [], char: '', text: '', story: d.story };
+          sheetNote();
+        } else backToPlayer(d.player);
+        break;
       }
       case 'del-note': {
-        const owner = noteDraft.player;
-        state.notes = state.notes.filter(n => n.id !== noteDraft.id); save(); backToPlayer(owner); break;
+        const owner = noteDraft.player, nid = noteDraft.id;
+        record('Note deleted', () => { state.notes = state.notes.filter(n => n.id !== nid); }); save(); backToPlayer(owner); break;
       }
       case 'new-nom': nomDraft = { id: null, day: state.phase.n, nominator: '', nominee: '', voters: [], votes: 0, executed: false }; sheetKind = 'nom'; sheetNom(); break;
       case 'edit-nom': nomDraft = JSON.parse(JSON.stringify(state.noms.find(n => n.id === el.dataset.nid))); sheetKind = 'nom'; sheetNom(); break;
@@ -815,23 +1092,29 @@
       case 'save-nom': {
         const d = nomDraft;
         if (!d.nominator || !d.nominee) { alert('Pick the nominator and the nominee.'); return; }
-        const old = d.id ? state.noms.find(n => n.id === d.id) : null;
-        // Only one execution per day: moving it brings the previous player back.
-        if (old && old.executed && (!d.executed || old.nominee !== d.nominee)) undoExecution(old);
-        if (d.executed) {
-          state.noms.forEach(n => { if (n.day === d.day && n.id !== d.id && n.executed) { undoExecution(n); n.executed = false; } });
-          const q = player(d.nominee); if (q && !q.dead) { q.dead = true; q.death = { how: 'execution', when: { kind: 'day', n: d.day } }; }
-        }
-        // Ghost votes: only a player who was already dead on that day spends one.
-        (old ? old.voters : []).forEach(v => { if (!d.voters.includes(v)) refundGhostVote(v, old); });
-        d.voters.forEach(v => { const q = player(v); if (deadDuring(q, d.day)) q.deadVoteUsed = true; });
-        if (!d.id) { d.id = uid(); state.noms.push(d); } else state.noms = state.noms.map(n => (n.id === d.id ? d : n));
+        record('Nomination saved', () => {
+          const old = d.id ? state.noms.find(n => n.id === d.id) : null;
+          // Only one execution per day: moving it brings the previous player back.
+          if (old && old.executed && (!d.executed || old.nominee !== d.nominee)) undoExecution(old);
+          if (d.executed) {
+            state.noms.forEach(n => { if (n.day === d.day && n.id !== d.id && n.executed) { undoExecution(n); n.executed = false; } });
+            const q = player(d.nominee); if (q && !q.dead) { q.dead = true; q.death = { how: 'execution', when: { kind: 'day', n: d.day } }; }
+          }
+          // Ghost votes: only a player who was already dead on that day spends one.
+          (old ? old.voters : []).forEach(v => { if (!d.voters.includes(v)) refundGhostVote(v, old); });
+          d.voters.forEach(v => { const q = player(v); if (deadDuring(q, d.day)) q.deadVoteUsed = true; });
+          if (!d.id) { d.id = uid(); state.noms.push(d); } else state.noms = state.noms.map(n => (n.id === d.id ? d : n));
+        });
         save(); closeSheet(); break;
       }
       case 'del-nom': {
-        const old = state.noms.find(n => n.id === nomDraft.id);
-        if (old) { if (old.executed) undoExecution(old); (old.voters || []).forEach(v => refundGhostVote(v, old)); }
-        state.noms = state.noms.filter(n => n.id !== nomDraft.id); save(); closeSheet(); break;
+        const nid = nomDraft.id;
+        record('Nomination deleted', () => {
+          const old = state.noms.find(n => n.id === nid);
+          if (old) { if (old.executed) undoExecution(old); (old.voters || []).forEach(v => refundGhostVote(v, old)); }
+          state.noms = state.noms.filter(n => n.id !== nid);
+        });
+        save(); closeSheet(); break;
       }
     }
   });
@@ -842,19 +1125,8 @@
     if (el.dataset.input === 'pname') { render(); }
     else if (ch === 'script') { state.scriptId = el.value; commit(); }
     else if (ch === 'me') { state.meId = el.value || null; commit(); }
-    else if (ch === 'mychar') {
-      state.myChar = el.value;
-      const info = el.value ? ci(el.value) : null;
-      if (info) state.myAlign = Engine.isEvilTeam(info.team) ? 'evil' : 'good';
-      commit();
-    }
     else if (ch === 'known-demon') { state.knownDemon = el.value || null; commit(); }
     else if (ch === 'evil-ov') { const v = parseInt(el.value, 10); state.evilOverride = v > 0 ? v : null; commit(); }
-    else if (ch === 'claim') {
-      const p = player(el.dataset.pid);
-      if (el.value) p.claims.push({ char: el.value, when: { ...state.phase } }); else p.claims = [];
-      save(); refreshSheet();
-    }
     else if (el.dataset.draft && draft) {
       const k = el.dataset.draft;
       if (k === 'when') { const [kind, n] = el.value.split(':'); draft.when = { kind, n: Number(n) }; }
@@ -880,7 +1152,8 @@
     }
     else if (el.id === 'game-file' && el.files[0]) {
       el.files[0].text().then(t => {
-        try { const s = JSON.parse(t); if (!Array.isArray(s.players)) throw new Error('not a game file'); state = Engine.sanitizeGame(s, freshState()); uiTab = state.players.length ? 'town' : 'setup'; commit(); toast('Game loaded'); }
+        try { const s = JSON.parse(t); if (!Array.isArray(s.players)) throw new Error('not a game file'); const next = Engine.sanitizeGame(s, freshState());
+          record('Game loaded', () => { state = next; }); uiTab = state.players.length ? 'town' : 'setup'; commit(); }
         catch (err) { alert('Could not load that file: ' + err.message); }
       });
     }
@@ -894,13 +1167,18 @@
       guideFilter = el.value; const pos = el.selectionStart; render();
       const inp = document.querySelector('[data-input="guide-filter"]'); inp.focus(); inp.setSelectionRange(pos, pos);
     }
+    else if (el.dataset.input === 'picker-q' && pickerState) { pickerState.q = el.value; $('#picker-list').innerHTML = pickerListHtml(); }
     else if (el.dataset.draft === 'text' && draft) draft.text = el.value;
     else if (el.dataset.note === 'text' && noteDraft) noteDraft.text = el.value;
+  });
+  document.addEventListener('keydown', (e) => {
+    // Enter in the picker's search picks the only match.
+    if (e.key === 'Enter' && e.target.id === 'picker-q') { const hits = $('#picker-list').querySelectorAll('.pick'); if (hits.length === 1) { e.preventDefault(); hits[0].click(); } }
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'new-player') { e.preventDefault(); document.querySelector('[data-act="add-player"]').click(); } });
 
   // Re-render the page underneath the sheet when it closes; while open, keep data fresh.
   let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (uiTab === 'town' || document.body.classList.contains('two-pane')) render(); }, 150); });
-  window.__companion = { get state() { return state; }, Engine };
+  window.__companion = { get state() { return state; }, get undoDepth() { return undoStack.length; }, Engine };
   render();
 })();
