@@ -336,6 +336,13 @@ const Engine = (() => {
       const info = charInfo(c, script);
       if (!has(c) && info.team !== 'traveller' && info.team !== 'fabled') push('warn', `<b>${ps.map(p => p.name).join(', ')}</b> claimed <b>${cname(c)}</b>, which is not on this script. That is almost certainly a lie.`);
     }
+    // A good player bluffing: the solver uses your true role, so flag clashes with your cover here.
+    const mine = state.players.find(p => p.id === state.meId);
+    const cover = mine && latestClaim(mine);
+    if (cover && state.myAlign === 'good' && cover !== state.myChar) {
+      const rivals = claims.filter(x => x.p.id !== state.meId && x.c === cover);
+      if (rivals.length) push('warn', `<b>${rivals.map(x => x.p.name).join(', ')}</b> also claim${rivals.length === 1 ? 's' : ''} <b>${cname(cover)}</b>, the role you are bluffing.`);
+    }
     const outsiderClaims = claims.filter(x => x.c && charInfo(x.c, script).team === 'outsider');
     const tfClaims = claims.filter(x => x.c && charInfo(x.c, script).team === 'townsfolk');
     let maxO = s.outsider, minO = s.outsider;
@@ -406,13 +413,40 @@ const Engine = (() => {
 
   // Bluff suggestions for evil players: good characters nobody has claimed.
   function bluffs(state, script) {
-    const claimedSet = new Set(state.players.map(p => latestClaim(p)).filter(Boolean));
+    const claimedSet = new Set(state.players.filter(p => p.id !== state.meId).map(p => latestClaim(p)).filter(Boolean));
     const safe = ['washerwoman', 'librarian', 'investigator', 'chef', 'undertaker', 'monk', 'soldier', 'ravenkeeper', 'clockmaker', 'dreamer', 'oracle', 'flowergirl', 'towncrier', 'sage', 'chambermaid', 'grandmother', 'innkeeper', 'exorcist', 'courtier'];
     return script.characters
       .map(c => charInfo(c, script))
       .filter(c => (c.team === 'townsfolk' || c.team === 'outsider') && !claimedSet.has(c.id))
       .map(c => ({ ...c, safe: safe.includes(c.id) }))
       .sort((a, b) => (b.safe - a.safe) || (a.team === 'townsfolk' ? -1 : 1));
+  }
+
+  // ── Player timeline ──────────────────────────────────────────────────────
+  // One chronological story per player, built from what is already recorded.
+  // Private notes stay on your own timeline and never appear on anyone else's.
+  const phaseRank = (ph) => (ph ? ph.n * 2 + (ph.kind === 'day' ? 1 : 0) : 0);
+  function timeline(state, pid) {
+    const p = state.players.find(x => x.id === pid);
+    if (!p) return [];
+    const out = [];
+    (p.claims || []).forEach(c => out.push({ type: 'claim', when: c.when, char: c.char }));
+    (state.notes || []).forEach((note) => {
+      if (note.player === pid) out.push({ type: 'note', when: note.when, note, mentioned: false });
+      else if ((note.targets || []).includes(pid) && note.story !== 'true') out.push({ type: 'note', when: note.when, note, mentioned: true });
+    });
+    (state.evidence || []).forEach((ev) => {
+      if (ev.source === pid) out.push({ type: 'info', when: ev.when, ev, role: 'source' });
+      else if ((ev.players || []).includes(pid)) out.push({ type: 'info', when: ev.when, ev, role: 'about' });
+    });
+    (state.noms || []).forEach((nom) => {
+      const when = { kind: 'day', n: nom.day };
+      if (nom.nominator === pid) out.push({ type: 'nom', when, nom, role: 'nominated' });
+      if (nom.nominee === pid) out.push({ type: 'nom', when, nom, role: 'nominee' });
+      if ((nom.voters || []).includes(pid)) out.push({ type: 'nom', when, nom, role: 'voted' });
+    });
+    if (p.dead && p.death) out.push({ type: 'death', when: p.death.when, how: p.death.how });
+    return out.map((item, i) => ({ item, i })).sort((a, b) => (phaseRank(a.item.when) - phaseRank(b.item.when)) || (a.i - b.i)).map(x => x.item);
   }
 
   // ── Saved games ──────────────────────────────────────────────────────────
@@ -451,6 +485,13 @@ const Engine = (() => {
       if (!id || !safeId(n.nominator) || !safeId(n.nominee)) return [];
       return [{ id, day: safeNum(n.day, 1, 99, 1), nominator: n.nominator, nominee: n.nominee, voters: safeIds(n.voters), votes: safeNum(n.votes, 0, 99, 0), executed: !!n.executed }];
     });
+    const notes = (Array.isArray(s.notes) ? s.notes : []).flatMap((x) => {
+      const id = x && safeId(x.id);
+      if (!id || !seen.has(x.player)) return [];
+      return [{ id, player: x.player, when: safePhase(x.when), kind: ['did', 'learned', 'said'].includes(x.kind) ? x.kind : 'said',
+        targets: safeIds(x.targets).filter(t => seen.has(t)), char: safeId(x.char) || '', text: safeText(x.text, 2000),
+        story: x.story === 'true' && x.player === s.meId ? 'true' : 'public' }];
+    });
     let customScript = null;
     if (s.customScript && typeof s.customScript === 'object') {
       const custom = {};
@@ -463,9 +504,9 @@ const Engine = (() => {
     const has = (id) => (seen.has(id) ? id : null);
     return { ...base, scriptId: hasScript ? s.scriptId : base.scriptId, customScript, players, meId: has(s.meId), myChar: safeId(s.myChar) || '',
       myAlign: s.myAlign === 'evil' ? 'evil' : 'good', knownEvil: safeIds(s.knownEvil).filter(has), knownDemon: has(s.knownDemon),
-      evilOverride: s.evilOverride ? safeNum(s.evilOverride, 1, 14, null) : null, phase: safePhase(s.phase), evidence, noms, gameOver: !!s.gameOver,
+      evilOverride: s.evilOverride ? safeNum(s.evilOverride, 1, 14, null) : null, phase: safePhase(s.phase), evidence, noms, notes, gameOver: !!s.gameOver,
       tab: ['setup', 'town', 'info', 'days', 'read', 'guide'].includes(s.tab) ? s.tab : base.tab };
   }
 
-  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, safeId, sanitizeGame };
+  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, safeId, sanitizeGame };
 })();

@@ -7,8 +7,8 @@
 
   // ── State ────────────────────────────────────────────────────────────────
   function freshState() {
-    return { v: 1, scriptId: 'trouble-brewing', customScript: null, players: [], meId: null, myChar: '', myAlign: 'good',
-      knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], gameOver: false, tab: 'setup' };
+    return { v: 2, scriptId: 'trouble-brewing', customScript: null, players: [], meId: null, myChar: '', myAlign: 'good',
+      knownEvil: [], knownDemon: null, evilOverride: null, phase: { kind: 'night', n: 1 }, evidence: [], noms: [], notes: [], gameOver: false, tab: 'setup' };
   }
   let state;
   try { state = Engine.sanitizeGame(JSON.parse(localStorage.getItem(KEY)), freshState()); } catch { state = freshState(); }
@@ -193,7 +193,8 @@
     const tokens = state.players.map((p, i) => {
       const ang = (i / N) * Math.PI * 2 - Math.PI / 2;
       const x = 50 + radius * Math.cos(ang), y = 50 + radius * Math.sin(ang);
-      const claim = Engine.claimOf(state, p);
+      // The circle shows public claims only, so your true role isn't on display at the table.
+      const claim = Engine.latestClaim(p);
       const info = claim ? ci(claim) : null;
       const pct = showPct && !p.traveller && p.id !== state.meId ? Math.round(a.players[p.id].evil * 100) : null;
       return `<button class="token ${p.dead ? 'dead' : ''}" data-act="open-player" data-pid="${p.id}" style="left:${x}%;top:${y}%;--ring:${ringColor(p)}">
@@ -225,7 +226,7 @@
   function sheetPlayer(pid) {
     const p = player(pid); if (!p) return;
     const a = analysis();
-    const claim = Engine.claimOf(state, p);
+    const claim = Engine.latestClaim(p);
     const info = claim ? ci(claim) : null;
     const isMe = p.id === state.meId;
     const res = a && !a.error && !isEvilMe() && !p.traveller ? a.players[p.id] : null;
@@ -236,13 +237,13 @@
       ${res && !isMe ? `<p><span class="pct" style="color:${ringColor(p)}">${Math.round(res.evil * 100)}% evil</span> · <span class="muted">${Math.round(res.demon * 100)}% Demon</span></p>
         ${res.reasons.map(r => `<div class="reason"><span class="${r.delta > 0 ? 'up' : 'down'}">${r.delta > 0 ? '▲' : '▼'} ${Math.abs(Math.round(r.delta * 100))}</span> ${esc(r.label)}</div>`).join('')}` : ''}
       <div class="stack" style="margin-top:12px">
-        ${isMe ? `<div class="tip info">Your own character is set on the Setup tab.</div>` : `
-        <div><label class="field" for="claim-sel">What they claim to be</label>
+        ${isMe ? trueRoleCard(p) : ''}
+        <div><label class="field" for="claim-sel">${isMe ? 'What you are telling the table' : 'What they claim to be'}</label>
           <select id="claim-sel" data-change="claim" data-pid="${p.id}">${charOptions(Engine.latestClaim(p), { blank: '— no claim —' })}</select>
           ${p.claims.length > 1 ? `<div class="faint" style="margin-top:4px">Claim history: ${p.claims.map(c => `${esc(ci(c.char).name)} (${Engine.phaseLabel(c.when)})`).join(' → ')}. <b>Changing claims is a red flag</b>, unless a Barber, Pit-Hag or madness explains it.</div>` : ''}
-          ${info ? `<div class="tip info" style="margin-top:8px"><b class="team-${info.team}">${esc(info.name)}</b>: ${esc(info.ability)}<br><span class="muted"><b>If they claim this:</b> ${esc(info.spot || (TEAM_TIPS[info.team] || {}).spot || '')}</span></div>` : ''}
+          ${info ? `<div class="tip info" style="margin-top:8px"><b class="team-${info.team}">${esc(info.name)}</b>: ${esc(info.ability)}<br><span class="muted"><b>${isMe ? 'How others will judge this claim:' : 'If they claim this:'}</b> ${esc(info.spot || (TEAM_TIPS[info.team] || {}).spot || '')}</span></div>` : ''}
         </div>
-        <div><label class="field">Your read</label>
+        ${isMe ? '' : `<div><label class="field">Your read</label>
           <div class="seg">${[-2, -1, 0, 1, 2].map(g => `<button data-act="gut" data-pid="${p.id}" data-v="${g}" class="${(p.gut || 0) === g ? 'on' : ''}">${gutLabels[g]}</button>`).join('')}</div>
           <div class="faint">Your read nudges the analysis slightly. Logged info counts for much more.</div></div>
         <div><label class="field">Lock (only if you're certain)</label>
@@ -257,18 +258,99 @@
           ${p.dead ? `<div class="row" style="margin-top:8px"><span class="faint">Died ${esc(Engine.phaseLabel(p.death && p.death.when))}</span>
             <button class="btn small ${p.deadVoteUsed ? '' : 'primary'}" data-act="ghost" data-pid="${p.id}">${p.deadVoteUsed ? 'Ghost vote used' : 'Ghost vote available'}</button></div>` : ''}
         </div>
-        <div><label class="field" for="pnotes">Notes</label><textarea id="pnotes" data-input="pnotes" data-pid="${p.id}" placeholder="What did they tell you? Who do they defend?">${esc(p.notes || '')}</textarea></div>
+        <div><label class="field" for="pnotes">Notes</label><textarea id="pnotes" data-input="pnotes" data-pid="${p.id}" placeholder="${isMe ? 'Your plan, suspicions, things to remember…' : 'What did they tell you? Who do they defend?'}">${esc(p.notes || '')}</textarea></div>
         <div class="row"><button class="btn primary" data-act="log-from" data-pid="${p.id}">Log info ${isMe ? 'you' : esc(p.name)} learned</button>
-          <button class="btn" data-act="log-about" data-pid="${p.id}">Log info about ${esc(p.name)}</button></div>
-        ${evidenceFor(p.id)}
+          ${isMe ? '' : `<button class="btn" data-act="log-about" data-pid="${p.id}">Log info about ${esc(p.name)}</button>`}
+          <button class="btn" data-act="new-note" data-pid="${p.id}">+ Add to timeline</button></div>
+        ${timelineHtml(p.id)}
       </div>`);
   }
 
-  function evidenceFor(pid) {
-    const list = state.evidence.filter(e => e.source === pid || (e.players || []).includes(pid));
-    if (!list.length) return '';
-    return `<div><label class="field">Info involving ${esc(pname(pid))}</label>${list.map(entryHtml).join('')}</div>`;
+  function trueRoleCard(p) {
+    const real = state.myChar ? ci(state.myChar) : null;
+    const cover = Engine.latestClaim(p);
+    const status = !cover ? 'No public claim yet'
+      : cover === state.myChar ? 'Telling the truth'
+      : `Bluffing as <b class="team-${ci(cover).team}">${esc(ci(cover).name)}</b>`;
+    return `<div class="truth-card">
+      <div class="row between"><span class="faint">Your true role · private</span><button class="btn small" data-goto="setup">Change</button></div>
+      <div><b class="${real ? 'team-' + real.team : ''}">${real ? esc(real.name) : 'Not set'}</b> <span class="muted">· ${isEvilMe() ? 'Evil' : 'Good'}</span></div>
+      <div class="muted">${status}</div>
+    </div>`;
   }
+
+  // ── Timeline ─────────────────────────────────────────────────────────────
+  const NOTE_KINDS = [['did', 'Did'], ['learned', 'Learned / saw'], ['said', 'Said']];
+
+  function noteText(n) {
+    const who = (n.targets || []).map(id => `<b>${esc(pname(id))}</b>`).join(', ');
+    const c = n.char ? `<b class="team-${ci(n.char).team}">${esc(ci(n.char).name)}</b>` : '';
+    const detail = [who, c].filter(Boolean).join(' · ');
+    return `${detail ? `<div>${detail}</div>` : ''}${n.text ? `<div class="muted">${esc(n.text)}</div>` : ''}`;
+  }
+
+  function timelineItem(it, pid) {
+    const row = (title, body = '', attrs = '') => `<div class="tl-item" ${attrs}><div class="tl-title">${title}</div>${body}</div>`;
+    if (it.type === 'claim') return row(`Claimed <b class="team-${ci(it.char).team}">${esc(ci(it.char).name)}</b>`);
+    if (it.type === 'death') return row(`<b class="team-demon">${it.how === 'execution' ? 'Executed' : it.how === 'night' ? 'Died at night' : 'Died'}</b>`);
+    if (it.type === 'nom') {
+      const label = it.role === 'nominated' ? `Nominated <b>${esc(pname(it.nom.nominee))}</b>`
+        : it.role === 'nominee' ? `Nominated by <b>${esc(pname(it.nom.nominator))}</b> · ${it.nom.votes} vote${it.nom.votes === 1 ? '' : 's'}`
+        : `Voted for <b>${esc(pname(it.nom.nominee))}</b>`;
+      return row(label);
+    }
+    if (it.type === 'info') {
+      const title = it.role === 'source' ? 'Shared info' : `Mentioned by ${esc(pname(it.ev.source))}`;
+      return row(title, `<div>${describe(it.ev)}</div>${it.ev.text ? `<div class="muted">${esc(it.ev.text)}</div>` : ''}`, `data-act="edit-ev" data-eid="${it.ev.id}" role="button" tabindex="0"`);
+    }
+    const n = it.note;
+    const kind = (NOTE_KINDS.find(k => k[0] === n.kind) || NOTE_KINDS[2])[1];
+    const by = it.mentioned ? `${esc(pname(n.player))} · ` : '';
+    const badge = n.player === state.meId && pid === state.meId
+      ? `<span class="story ${n.story === 'true' ? 'private' : 'public'}">${n.story === 'true' ? 'Private truth' : 'Told the table'}</span>` : '';
+    return row(`${by}${kind} ${badge}`, noteText(n), `data-act="edit-note" data-noteid="${n.id}" role="button" tabindex="0"`);
+  }
+
+  function timelineHtml(pid) {
+    const items = Engine.timeline(state, pid);
+    if (!items.length) return '';
+    const groups = [];
+    items.forEach((it) => {
+      const label = Engine.phaseLabel(it.when);
+      if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, items: [] });
+      groups[groups.length - 1].items.push(it);
+    });
+    return `<div class="timeline"><label class="field">Timeline</label>${groups.map(g => `<div class="tl-phase"><div class="tl-label">${esc(g.label)}</div>${g.items.map(it => timelineItem(it, pid)).join('')}</div>`).join('')}</div>`;
+  }
+
+  let noteDraft = null;
+  function phaseList() {
+    const out = [];
+    for (let n = 1; n <= state.phase.n; n++) { out.push({ kind: 'night', n }); if (n < state.phase.n || state.phase.kind === 'day') out.push({ kind: 'day', n }); }
+    return out;
+  }
+  function sheetNote() {
+    const d = noteDraft;
+    const isMe = d.player === state.meId;
+    const phases = phaseList();
+    if (!phases.some(ph => ph.kind === d.when.kind && ph.n === d.when.n)) phases.push(d.when);
+    openSheet(`
+      <div class="grab"></div><button class="btn small close" data-act="cancel-note">Back</button>
+      <h2>${d.id ? 'Edit' : 'Add to'} ${isMe ? 'your' : esc(pname(d.player)) + '\'s'} timeline</h2>
+      <div class="stack">
+        ${isMe ? `<div><label class="field">Is this what really happened?</label>
+          <div class="seg"><button data-act="note-story" data-v="true" class="${d.story === 'true' ? 'on' : ''}">Private truth</button><button data-act="note-story" data-v="public" class="${d.story === 'public' ? 'on' : ''}">What I told the table</button></div></div>` : ''}
+        <div><label class="field" for="note-when">When</label><select id="note-when" data-note="when">${phases.map(ph => `<option value="${ph.kind}:${ph.n}" ${d.when.kind === ph.kind && d.when.n === ph.n ? 'selected' : ''}>${Engine.phaseLabel(ph)}</option>`).join('')}</select></div>
+        <div><label class="field">${isMe ? 'What kind of note?' : 'What are they claiming?'}</label>
+          <div class="seg">${NOTE_KINDS.map(([v, l]) => `<button data-act="note-kind" data-v="${v}" class="${d.kind === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+        <div><label class="field">Which players? <span class="faint">(optional)</span></label>
+          <div class="chips">${state.players.filter(p => p.id !== d.player).map(p => `<button class="chip-btn ${p.dead ? 'dead' : ''} ${d.targets.includes(p.id) ? 'on' : ''}" data-act="note-target" data-pid="${p.id}">${esc(p.name)}</button>`).join('')}</div></div>
+        <div><label class="field" for="note-char">Character <span class="faint">(optional)</span></label><select id="note-char" data-note="char">${charOptions(d.char, { blank: '— none —' })}</select></div>
+        <div><label class="field" for="note-text">Details</label><textarea id="note-text" data-note="text" placeholder="e.g. Protected Ben last night, saw a 1 on the Empath…">${esc(d.text)}</textarea></div>
+        <div class="row"><button class="btn primary" data-act="save-note">Save</button>${d.id ? '<button class="btn danger" data-act="del-note">Delete</button>' : ''}</div>
+      </div>`);
+  }
+  function backToPlayer(pid) { noteDraft = null; sheetKind = 'player:' + pid; sheetPlayer(pid); }
 
   // ── Info log ─────────────────────────────────────────────────────────────
   const TEMPLATES = [
@@ -323,7 +405,7 @@
     const t = TEMPLATES.find(x => x.id === draft.template);
     const f = t.fields;
     const sourceOpts = `<option value="st" ${draft.source === 'st' ? 'selected' : ''}>Storyteller / public fact</option>` +
-      state.players.map(p => `<option value="${p.id}" ${draft.source === p.id ? 'selected' : ''}>${esc(p.name)}${p.id === state.meId ? ' (you)' : ''}${Engine.claimOf(state, p) ? ' · ' + esc(ci(Engine.claimOf(state, p)).name) : ''}</option>`).join('');
+      state.players.map(p => `<option value="${p.id}" ${draft.source === p.id ? 'selected' : ''}>${esc(p.name)}${p.id === state.meId ? ' (you)' : ''}${Engine.latestClaim(p) ? ' · ' + esc(ci(Engine.latestClaim(p)).name) : ''}</option>`).join('');
     const sc = new Set(script().characters);
     const relevant = TEMPLATES.filter(x => !x.chars.length || x.chars.some(c => sc.has(c)) || x.id === draft.template);
     const others = TEMPLATES.filter(x => !relevant.includes(x));
@@ -378,7 +460,7 @@
 
   function entryHtml(ev) {
     const srcP = player(ev.source);
-    const srcClaim = srcP ? Engine.claimOf(state, srcP) : null;
+    const srcClaim = srcP ? Engine.latestClaim(srcP) : null;
     return `<div class="entry" data-act="edit-ev" data-eid="${ev.id}" style="cursor:pointer">
       <div class="meta">${esc(Engine.phaseLabel(ev.when))} · from ${esc(pname(ev.source))}${srcClaim ? ' (' + esc(ci(srcClaim).name) + ')' : ''}</div>
       <div>${describe(ev)}</div>${ev.text ? `<div class="muted" style="font-size:.88em">${esc(ev.text)}</div>` : ''}</div>`;
@@ -522,13 +604,14 @@
     const s = $('#sheet'); const keep = s.hidden ? 0 : s.scrollTop;
     s.innerHTML = html; s.hidden = false; $('#sheet-backdrop').hidden = false; s.scrollTop = keep;
   }
-  function closeSheet() { $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; render(); }
+  function closeSheet() { $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; sheetKind = null; draft = null; nomDraft = null; noteDraft = null; render(); }
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); });
   function refreshSheet() {
     if (sheetKind && sheetKind.startsWith('player:')) sheetPlayer(sheetKind.slice(7));
     else if (sheetKind === 'ev') sheetEvidence();
     else if (sheetKind === 'nom') sheetNom();
+    else if (sheetKind === 'note') sheetNote();
   }
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -601,7 +684,7 @@
 
   document.addEventListener('click', (e) => {
     const g = e.target.closest('[data-goto]');
-    if (g) { uiTab = g.dataset.goto; render(); return; }
+    if (g) { uiTab = g.dataset.goto; if ($('#sheet').hidden) render(); else closeSheet(); return; }
     const el = e.target.closest('[data-act]'); if (!el) return;
     const act = el.dataset.act; const pid = el.dataset.pid || (el.closest('[data-pid]') || {}).dataset?.pid;
     const p = pid ? player(pid) : null;
@@ -623,6 +706,7 @@
         state.players = state.players.filter(x => x.id !== pid);
         state.evidence = state.evidence.filter(ev => ev.source !== pid && !(ev.players || []).includes(pid));
         state.noms = state.noms.filter(n => n.nominator !== pid && n.nominee !== pid).map(n => ({ ...n, voters: (n.voters || []).filter(v => v !== pid) }));
+        state.notes = state.notes.filter(n => n.player !== pid).map(n => ({ ...n, targets: n.targets.filter(t => t !== pid) }));
         if (state.meId === pid) state.meId = null;
         state.knownEvil = state.knownEvil.filter(x => x !== pid);
         commit(); break;
@@ -679,6 +763,30 @@
       case 'quick-death': {
         setDeath(p, p.dead ? '' : 'night');
         commit(); break;
+      }
+      case 'new-note':
+        noteDraft = { id: null, player: pid, when: { ...state.phase }, kind: pid === state.meId ? 'did' : 'said', targets: [], char: '', text: '', story: pid === state.meId ? 'true' : 'public' };
+        sheetKind = 'note'; sheetNote(); break;
+      case 'edit-note': {
+        const n = state.notes.find(x => x.id === el.dataset.noteid); if (!n) return;
+        noteDraft = JSON.parse(JSON.stringify(n)); sheetKind = 'note'; sheetNote(); break;
+      }
+      case 'cancel-note': backToPlayer(noteDraft.player); break;
+      case 'note-story': noteDraft.story = el.dataset.v; sheetNote(); break;
+      case 'note-kind': noteDraft.kind = el.dataset.v; sheetNote(); break;
+      case 'note-target':
+        noteDraft.targets = noteDraft.targets.includes(pid) ? noteDraft.targets.filter(x => x !== pid) : [...noteDraft.targets, pid];
+        sheetNote(); break;
+      case 'save-note': {
+        const d = noteDraft;
+        d.text = d.text.trim();
+        if (!d.text && !d.char && !d.targets.length) { toast('Add a player, character or details'); return; }
+        if (!d.id) { d.id = uid(); state.notes.push(d); } else state.notes = state.notes.map(n => (n.id === d.id ? d : n));
+        save(); backToPlayer(d.player); toast('Added to timeline'); break;
+      }
+      case 'del-note': {
+        const owner = noteDraft.player;
+        state.notes = state.notes.filter(n => n.id !== noteDraft.id); save(); backToPlayer(owner); break;
       }
       case 'new-nom': nomDraft = { id: null, day: state.phase.n, nominator: '', nominee: '', voters: [], votes: 0, executed: false }; sheetKind = 'nom'; sheetNom(); break;
       case 'edit-nom': nomDraft = JSON.parse(JSON.stringify(state.noms.find(n => n.id === el.dataset.nid))); sheetKind = 'nom'; sheetNom(); break;
@@ -739,6 +847,11 @@
       else draft[k] = el.value;
       sheetEvidence();
     }
+    else if (el.dataset.note && noteDraft) {
+      const k = el.dataset.note;
+      if (k === 'when') { const [kind, n] = el.value.split(':'); noteDraft.when = { kind, n: Number(n) }; }
+      else noteDraft[k] = el.value;
+    }
     else if (el.dataset.nom && nomDraft) {
       const k = el.dataset.nom; nomDraft[k] = k === 'votes' ? Number(el.value) : el.value;
     }
@@ -765,6 +878,7 @@
       const inp = document.querySelector('[data-input="guide-filter"]'); inp.focus(); inp.setSelectionRange(pos, pos);
     }
     else if (el.dataset.draft === 'text' && draft) draft.text = el.value;
+    else if (el.dataset.note === 'text' && noteDraft) noteDraft.text = el.value;
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'new-player') { e.preventDefault(); document.querySelector('[data-act="add-player"]').click(); } });
 

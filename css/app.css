@@ -153,6 +153,19 @@ table.simple { width: 100%; border-collapse: collapse; font-size: .9rem; }
 table.simple td, table.simple th { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
 .toast { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); background: var(--gold); color: #1b150d; padding: 8px 14px; border-radius: 8px; z-index: 60; font-weight: 600; }
 
+/* Notebook: true role and timeline */
+.truth-card { background: var(--ink-soft); border: 1px dashed var(--line-strong); border-radius: var(--r); padding: 10px 12px; }
+.timeline { border-top: 1px solid var(--line); padding-top: 10px; }
+.tl-phase { margin-bottom: 10px; }
+.tl-label { font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; color: var(--gold); margin-bottom: 4px; }
+.tl-item { border-left: 2px solid var(--line-strong); padding: 5px 10px; margin-left: 2px; font-size: .9rem; overflow-wrap: anywhere; }
+.tl-item[data-act] { cursor: pointer; }
+.tl-item[data-act]:hover { background: var(--ink-soft); }
+.tl-title { color: var(--text-dim); }
+.story { display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 999px; font-size: .7rem; border: 1px solid var(--line-strong); }
+.story.private { background: rgba(179,58,48,.2); color: #f2b3ab; }
+.story.public { background: var(--info-bg); color: #8fbad1; }
+
 @media (max-width: 420px) {
   main { padding: 12px; }
   .brand { font-size: .9rem; }
