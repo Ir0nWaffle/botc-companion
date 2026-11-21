@@ -288,3 +288,24 @@ details.pick-off > summary { cursor: pointer; padding: 12px 0; min-height: var(-
 .prompt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: var(--tap); margin-bottom: 6px; padding: 9px 14px; background: var(--good-bg); border: 1px solid rgba(242,184,75,.3); border-radius: var(--r-sm); color: var(--text); font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
 .prompt:hover { background: rgba(242,184,75,.18); }
 .prompt:active { transform: scale(.99); }
+
+/* Coaching */
+.tip.coach { margin-bottom: 8px; line-height: 1.4; }
+.tip.coach > b { display: block; margin-bottom: 2px; }
+.evil-note { margin-top: 4px; padding: 10px 13px; border-radius: var(--r-sm); background: rgba(240,98,93,.07); border: 1px solid rgba(240,98,93,.2); font-size: .9rem; overflow-wrap: anywhere; }
+.evil-note p { margin: 4px 0 0; color: var(--text-dim); }
+.lbl { margin: 12px 0 4px; font-size: .72rem; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--gold); }
+.lbl.risk { color: #FFADA9; }
+.evil-note .lbl { margin-top: 0; color: #FFADA9; }
+.how p { margin: 0 0 4px; font-size: .92rem; overflow-wrap: anywhere; }
+.how .lbl:first-child { margin-top: 0; }
+.say-line { margin: 0 0 6px; padding: 10px 13px; border-left: 3px solid var(--gold); background: var(--panel-2); border-radius: 0 var(--r-sm) var(--r-sm) 0; font-size: 1.02rem; font-weight: 560; line-height: 1.4; overflow-wrap: anywhere; }
+details.coach-x { margin: 6px 0 10px; border-top: 1px solid var(--line); }
+details.coach-x > summary { cursor: pointer; display: flex; align-items: center; min-height: var(--tap); font-weight: 640; font-size: .88rem; color: var(--gold-bright); }
+details.coach-x p { margin: 0 0 6px; font-size: .84rem; color: var(--text-dim); overflow-wrap: anywhere; }
+details.coach-x.in-guide { margin: 0 13px 8px; }
+details.coach-x.in-guide .how p { color: var(--text-dim); }
+details.rule.flat { background: transparent; border: 0; padding: 0; margin: 0; }
+.basics { margin: 0 0 12px; padding-left: 20px; color: var(--text-dim); font-size: .92rem; }
+.basics li { margin: 8px 0; overflow-wrap: anywhere; }
+.basics b { color: var(--text); }

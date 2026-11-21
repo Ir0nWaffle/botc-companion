@@ -392,7 +392,7 @@ const Engine = (() => {
     if (state.players.length) {
       const nonTravAlive = R.filter(p => !p.dead).length;
       push('info', `${alive} alive. It takes <b>${votesNeeded(state)} votes</b> to put someone on the block.`);
-      if (nonTravAlive === 4) push('warn', '<b>4 players alive.</b> If today\'s execution misses the Demon, the next night may bring the final 3. Choose carefully, and use ghost votes.');
+      if (nonTravAlive === 4) push('warn', '<b>4 players alive.</b> If today\'s execution misses the Demon, tonight\'s kill can end the game. With no execution, tomorrow is the final 3. Choose carefully, and use ghost votes.');
       if (nonTravAlive === 3) push('warn', '<b>Final 3!</b> If the Demon isn\'t executed today, evil wins after tonight\'s kill. ' + (has('mayor') ? 'A real Mayor wins for good if there is no execution.' : ''));
       const ghost = state.players.filter(p => p.dead && !p.deadVoteUsed).length;
       if (ghost && nonTravAlive <= 5) push('info', `${ghost} dead player${ghost > 1 ? 's' : ''} still ${ghost > 1 ? 'have' : 'has'} a ghost vote. Those votes decide endgames.`);
@@ -492,7 +492,7 @@ const Engine = (() => {
           if (outsiders >= range.max) add(-3, 'No Outsider slots left');
           else if (outsiders >= range.setup.outsider) add(-1, 'Would mean more Outsiders than usual');
         }
-        if (c.id === 'mutant') add(-2, 'Claiming it can get you executed');
+        if (c.id === 'mutant') add(-2, 'A real Mutant would avoid admitting it');
         if (c.id === 'virgin' || c.id === 'slayer') add(-2, 'Can be tested in public');
         if (shape.firstOnly) add(1, 'Only one piece of info to invent');
         else if (shape.nightly) add(-1, 'Needs a new story every night');
@@ -614,7 +614,167 @@ const Engine = (() => {
 
     const order = { bad: 0, warn: 1, info: 2, good: 3 };
     issues.sort((a, b) => order[a.level] - order[b.level]);
-    return { cover, isBluff, issues, clean: !issues.some(i => i.level === 'bad' || i.level === 'warn') };
+    return { cover, isBluff, issues, missing, clean: !issues.some(i => i.level === 'bad' || i.level === 'warn') };
+  }
+
+  // ── Coaching ─────────────────────────────────────────────────────────────
+  // Text comes from js/coach.js. A character with no entry (for example on a custom script) gets general advice
+  // for its team, shaped only by the wording of its ability. Drunk and Lunatic are never bluffable.
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  function coachFor(id, script) {
+    const info = charInfo(id, script);
+    if (!info || !['townsfolk', 'outsider'].includes(info.team) || ['drunk', 'lunatic'].includes(id)) return null;
+    if (typeof BLUFF_COACH !== 'undefined' && hasOwn(BLUFF_COACH, id)) return { generic: false, ...BLUFF_COACH[id] };
+    if (typeof TEAM_COACH === 'undefined') return null;
+    const t = TEAM_COACH[info.team];
+    const sh = abilityShape(info);
+    const line = sh.firstOnly ? t.shape.first : sh.onDeath ? t.shape.death : sh.once ? t.shape.once
+      : sh.nightly ? (sh.notFirstNight ? t.shape.notFirst : t.shape.nightly) : t.shape.passive;
+    return { generic: true, pitch: t.pitch, say: [t.say.replace('[role]', info.name)], reveal: t.reveal, prep: line, risk: t.risk };
+  }
+  const evilCoachFor = (id) => (typeof EVIL_ROLE_COACH !== 'undefined' && hasOwn(EVIL_ROLE_COACH, id) ? EVIL_ROLE_COACH[id] : null);
+
+  // A short, prioritised list of what to do right now. Uses only what the player knows: their own role, their
+  // public claim, the public record and (if evil) the team they were shown. Never more than 4 items.
+  function coachNow(state, script) {
+    const me = state.players.find(p => p.id === state.meId);
+    if (!me || !state.myChar) return [{ level: 'info', title: 'Set yourself up', text: 'Choose which player you are and your character on the Setup tab, and this will coach you through the game.' }];
+    if (state.gameOver) return [{ level: 'info', title: 'Game over', text: 'The game is marked as over. Start a new game from Setup when you are ready.' }];
+    const items = [];
+    const add = (pri, level, title, text) => items.push({ pri, level, title, text });
+    const evil = state.myAlign === 'evil';
+    const isDemon = evil && charInfo(state.myChar, script).team === 'demon';
+    const ph = state.phase || { kind: 'night', n: 1 };
+    const isDay = ph.kind === 'day';
+    const cover = latestClaim(me);
+    const bluffing = !!cover && cover !== state.myChar;
+    const check = bluffCheck(state, script);
+    const coverInfo = cover ? charInfo(cover, script) : null;
+    const cName = coverInfo ? coverInfo.name : 'your claim';
+    const shape = coverInfo ? abilityShape(coverInfo) : {};
+    const coach = bluffing ? coachFor(cover, script) : null;
+    const alive3 = ring(state).filter(p => !p.dead).length;
+    const names = (list) => list.map(p => p.name).join(' and ');
+    const team = evil ? new Set([...(state.knownEvil || []), state.knownDemon].filter(Boolean)) : new Set();
+
+    // Dead
+    if (me.dead) {
+      const ghost = me.deadVoteUsed ? 'Your ghost vote is already spent.' : 'You still have one ghost vote for the rest of the game, so save it for a vote that matters.';
+      add(5, 'info', 'You are dead', `You no longer have an ability, but you can still talk. ${ghost} Keep your ${bluffing ? cName + ' ' : ''}story straight: the table still believes or doubts dead players.`);
+      if (bluffing && !evil) add(8, 'info', 'Come clean when it helps', 'If you are good and still bluffing, say your real role once it can help your team. A dead player the town trusts is worth more than a safe story.');
+    } else if (isDay) {
+      // On the block, or nominated today
+      const todays = (state.noms || []).filter(n => n.day === ph.n && !n.executed);
+      const mine = todays.filter(n => n.nominee === me.id);
+      const need = votesNeeded(state);
+      const onBlock = mine.some(n => n.votes >= need && todays.every(o => o === n || o.votes < n.votes));
+      const saint = cover === 'saint' ? ' As a Saint, say plainly that executing a real Saint loses the game for the town. If you are executed and the game goes on, the claim is false.' : '';
+      if (onBlock) {
+        if (evil) add(0, 'bad', 'You are on the block', `Stay calm and say your ${cName} claim in one plain sentence, then answer with the details you prepared. Do not accuse a teammate to save yourself, and your team should not all rush to vote the same way for you.${saint}`);
+        else if (bluffing) add(0, 'bad', 'You are on the block', `Dying behind a cover story helps nobody on your team. Unless it protects someone, say your real role now and give your real information.${saint}`);
+        else add(0, 'bad', 'You are on the block', 'Say your role and exactly what you learned, night by night, then ask who is voting and why.');
+      } else if (mine.length) {
+        const ask = evil ? ' Do not ask your teammates to save you, and do not change your story under pressure.' : ' Do not change your story under pressure.';
+        add(2, 'warn', 'You were nominated today', `Answer in a sentence or two and repeat what you have already said${bluffing ? ` as the ${cName}` : ''}.${ask}${saint}`);
+      }
+    }
+
+    // Endgame (alive players only)
+    if (!me.dead && alive3 === 3) {
+      const mayorNote = cover === 'mayor' && evil ? ' A Mayor claim fits here: asking for no execution is natural, and if the town agrees the night kill can end the game.' : '';
+      if (!isDay) add(3, evil ? 'info' : 'bad', 'Final 3', evil
+        ? 'If the Demon kills tonight, only 2 players remain and evil wins. Keep your story steady until the game ends.'
+        : 'If the Demon kills tonight, only 2 players remain and evil wins. Only a night with no death keeps the game going.');
+      else if (evil) add(3, 'bad', 'Final 3', isDemon
+        ? `If you are not executed today, you win after the night kill or sooner. Keep your cover calm and make the town split its vote.${mayorNote}`
+        : `The town must execute the Demon today, or evil wins. Keep the vote off your Demon, and do not let your votes or defence line up with theirs.${mayorNote}`);
+      else add(3, 'bad', 'Final 3', 'If nobody is executed today, the Demon wins after the night kill, unless a real Mayor is among the three. Executing the wrong player ends the game too. Do not skip the vote: choose the most likely Demon and stand behind it.');
+      if (isDay && bluffing && !evil) add(4, 'warn', 'Come clean now', 'With three left, nobody can verify a cover story. If you have been bluffing, say your real role and what you know.');
+      if (evil && state.myChar === 'witch') add(6, 'info', 'Witch', 'With 3 players alive you lose your ability.');
+    } else if (!me.dead && alive3 === 4) {
+      const text = !isDay
+        ? `Tonight's kill will probably leave 3 alive, so tomorrow's execution decides the game.${evil ? ' Keep your story steady and do not vote in step with your Demon.' : ''}`
+        : evil
+          ? "If today's execution misses the Demon, 3 remain and tonight's kill wins the game for evil. With no execution, tomorrow is the Final 3. Keep your story steady and do not vote in step with your Demon."
+          : "A wrong execution today leaves 3, and tonight's kill ends the game. If you are unsure, skipping the execution keeps one last vote for tomorrow's Final 3.";
+      add(3, 'warn', '4 alive', text);
+      if (evil && state.myChar === 'scarletwoman') add(6, 'info', 'Scarlet Woman', 'You only replace a dead Demon while 5 or more players are alive, so at 4 alive that backup is gone.');
+    }
+
+    // No cover yet
+    if (!cover && !me.dead) {
+      if (evil) {
+        const bluffsKnown = (state.bluff && state.bluff.demonBluffs || []).length;
+        const hint = bluffsKnown ? ' One of the Demon\'s bluffs is the safest pick, since no real one is in play.' : ' Choose a role nobody has claimed yet from the list below.';
+        add(1, 'warn', 'Pick a cover', (ph.kind === 'night' && ph.n === 1
+          ? 'Choose your cover tonight, before the first day conversation: "who are you?" is the first question.'
+          : isDay && ph.n === 1 ? 'It is Day 1 and you have no public claim. Pick one before you are asked, because a prepared answer draws less suspicion than silence.'
+            : `You still have no public claim on ${phaseLabel(ph)}. Pick one before you are asked again.`) + hint);
+      } else {
+        add(9, 'info', 'No claim yet', 'You have not told the table a role. As a good player you can claim your real one when it helps. Bluff only with a clear reason.');
+      }
+    }
+
+    // Claiming your own evil character
+    if (evil && cover && cover === state.myChar) add(1, 'bad', 'You claimed your real role', 'You are publicly claiming your true evil character. Unless that is a deliberate plan, pick a good character as your cover.');
+
+    // Your cover against the record
+    if (bluffing) {
+      const rivals = state.players.filter(p => p.id !== me.id && latestClaim(p) === cover);
+      const mates = rivals.filter(p => team.has(p.id));
+      const others = rivals.filter(p => !team.has(p.id));
+      if (mates.length) add(1, 'bad', 'Double claim with your teammate', `${names(mates)} also claims ${cName}. Settle it in private before the next public talk: one keeps it, and the other moves to a different role. Do not argue about it in public.`);
+      if (others.length) {
+        const bluffRole = evil && ((state.bluff && state.bluff.demonBluffs) || []).includes(cover);
+        add(1, 'bad', 'Double claim', evil
+          ? `${names(others)} also claims ${cName}${bluffRole ? ', which is one of the Demon\'s bluffs, so unless they are a Drunk they are lying, though the table cannot know that' : ' and could be the real one'}. Do not fight them: stay calm, keep your details consistent, and decide in advance whether to drop it.`
+          : `${names(others)} also claims ${cName}. Give your details first and in full, and ask for theirs, because the gaps will show. If your bluff protects nobody, your real role may be the stronger claim now.`);
+      }
+      const fixes = [
+        [/not on this script/, 'Change your cover', 'Pick a character from this script. Switching once is better than defending a claim nobody can believe.'],
+        [/evil character/, 'Your claim is an evil character', 'Switch to a good character from the ranked list below, and switch only once.'],
+        [/publicly changed your claim/, 'You changed your claim', 'Have one short reason ready for the switch and do not change again. The table remembers every change.'],
+        [/Outsider claims/, 'Too many Outsider claims', 'The table counts Outsiders. Move to a Townsfolk cover, or be ready to explain why the count is high.'],
+        [/Townsfolk claims/, 'Many Townsfolk claims', 'Some of those claims are false. Expect the table to compare details, and make yours the most specific.'],
+        [/You were dead by/, 'Your story acts after death', 'Remove or correct the line that has you using the ability after you died.']
+      ];
+      let serious = 0;
+      check.issues.filter(i => (i.level === 'bad' || i.level === 'warn') && !/also claims/.test(i.text)).forEach((i) => {
+        if (serious >= 2) return;
+        const f = fixes.find(x => x[0].test(i.text));
+        add(i.level === 'bad' ? 1 : 4, i.level, f ? f[1] : 'Fix this in your story', f ? `${i.text} ${f[2]}` : `${i.text} Edit that line in Your story, or change your cover before you speak again.`);
+        serious++;
+      });
+
+      if (!me.dead) {
+        const missing = check.missing || [];
+        if (missing.length) {
+          const label = missing.map(n => `Night ${n}`).join(', ');
+          const prep = coach ? coach.prep : 'Write down what your ability would have told you.';
+          add(4, 'warn', `Prepare ${label}`, `Someone will ask what you learned as the ${cName}. ${prep}`);
+        }
+        const hasNight1 = shape.firstOnly || (shape.nightly && !shape.notFirstNight);
+        if (ph.kind === 'night' && ph.n === 1) add(7, 'info', 'Before Day 1', hasNight1
+          ? `The ${cName} gets information on Night 1. Write down what you will say, and who it points at, before the first talk.`
+          : `The ${cName} gives you nothing you must report from Night 1. If asked, say so plainly rather than inventing something.`);
+        else if (isDay && ph.n === 1) add(shape.notFirstNight ? 2 : 7, shape.notFirstNight ? 'warn' : 'info', 'Day 1 talk', `${shape.notFirstNight ? `The ${cName} does not act on Night 1, so do not say "last night I..." yet. ` : ''}Say your claim the same way each time and give details only when asked. Mark lines as told in Your story as you say them.`);
+        else if (ph.kind === 'night') add(7, 'info', 'Plan tomorrow', shape.nightly || shape.firstOnly
+          ? `Decide your ${cName} info for ${phaseLabel(ph)} now, before anyone asks.`
+          : `The ${cName} has nothing new to report for ${phaseLabel(ph)}. Keep your story as it is.`);
+        else add(7, 'info', 'Stay consistent', 'Before you speak, check Your story for last night, and mark each line you say as told. Match what you said on earlier days.');
+        if (evil) add(9, 'info', 'Play the evil team', isDemon
+          ? 'Let your cover do the work and stay low. Avoid voting in the same pattern as your Minions.'
+          : 'Protect your Demon without being seen to. Do not accuse them, and do not vote the same way as your team every time: a group that always votes together is easy to spot.');
+        else add(9, 'info', 'Come clean on purpose', 'Bluff only for a reason, such as keeping a weak role away from the Demon. Good players must be believed in the end, so decide when you will say your real role: before an execution, or once the danger passes.');
+      }
+    }
+    if (evil && !bluffing && !me.dead && cover !== state.myChar) {
+      add(9, 'info', 'Play the evil team', isDemon
+        ? 'Let your cover do the work and stay low. Avoid voting in the same pattern as your Minions.'
+        : 'Protect your Demon without being seen to. Do not accuse them, and do not vote the same way as your team every time.');
+    }
+    return items.map((x, i) => ({ x, i })).sort((a, b) => (a.x.pri - b.x.pri) || (a.i - b.i)).slice(0, 4)
+      .map(({ x }) => ({ level: x.level, title: x.title, text: x.text }));
   }
 
   // ── Saved games ──────────────────────────────────────────────────────────
@@ -684,5 +844,5 @@ const Engine = (() => {
       tab: ['setup', 'town', 'info', 'days', 'read', 'bluff', 'guide'].includes(s.tab) ? s.tab : base.tab };
   }
 
-  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, phaseRank, bluffOptions, bluffCheck, safeId, sanitizeGame };
+  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, phaseRank, bluffOptions, bluffCheck, coachFor, evilCoachFor, coachNow, safeId, sanitizeGame };
 })();

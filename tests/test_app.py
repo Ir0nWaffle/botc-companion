@@ -716,6 +716,275 @@ with sync_playwright() as pw:
     page.screenshot(path=str(SHOTS / '19-bluff-tablet.png'))
     page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(220)
 
+
+    # ── Phase 6: coaching data ──
+    data = page.evaluate("""() => {
+      const fields = ['pitch', 'say', 'reveal', 'prep', 'risk'];
+      const need = [];
+      for (const id of ['trouble-brewing', 'bad-moon-rising', 'sects-violets'])
+        SCRIPTS[id].characters.forEach(c => { if (['townsfolk', 'outsider'].includes(CHARACTERS[c].team) && !['drunk', 'lunatic'].includes(c)) need.push(c); });
+      const evilNeed = [];
+      for (const id of ['trouble-brewing', 'bad-moon-rising', 'sects-violets'])
+        SCRIPTS[id].characters.forEach(c => { if (['minion', 'demon'].includes(CHARACTERS[c].team)) evilNeed.push(c); });
+      const full = (e) => e && fields.every(f => f === 'say' ? Array.isArray(e.say) && e.say.length >= 1 && e.say.length <= 2 && e.say.every(x => typeof x === 'string' && x.trim()) : typeof e[f] === 'string' && e[f].trim().length > 10);
+      const words = (e) => Math.max(...fields.filter(f => f !== 'say').map(f => e[f].split(/\\s+/).length));
+      return { count: need.length, complete: need.filter(c => !full(BLUFF_COACH[c])), noDrunk: !('drunk' in BLUFF_COACH) && !('lunatic' in BLUFF_COACH),
+        realKeys: Object.keys(BLUFF_COACH).filter(k => !CHARACTERS[k]), extra: Object.keys(BLUFF_COACH).filter(k => !need.includes(k)),
+        evilMissing: evilNeed.filter(c => !EVIL_ROLE_COACH[c] || !EVIL_ROLE_COACH[c].length || EVIL_ROLE_COACH[c].length > 2 || EVIL_ROLE_COACH[c].some(t => !t.trim())),
+        evilReal: Object.keys(EVIL_ROLE_COACH).filter(k => !CHARACTERS[k] || !['minion', 'demon'].includes(CHARACTERS[k].team)), evilCount: evilNeed.length,
+        longest: Math.max(...need.map(c => words(BLUFF_COACH[c]))), basics: BLUFF_BASICS.length,
+        teamKeys: Object.keys(TEAM_COACH).sort().join(),
+        nullFor: ['drunk', 'lunatic', 'imp', 'baron'].map(c => Engine.coachFor(c, SCRIPTS['trouble-brewing']))
+      };
+    }""")
+    check(data['count'] == 16 + 16 + 17 - 0 or data['count'] > 40, f"required bluffable characters counted ({data['count']})")
+    check(data['complete'] == [], f"every required character has all five coaching fields (missing: {data['complete']})")
+    check(data['noDrunk'], 'no coaching entry for Drunk or Lunatic')
+    check(data['realKeys'] == [] and data['extra'] == [], f"every BLUFF_COACH key is a real, required character ({data['realKeys']} {data['extra']})")
+    check(data['evilMissing'] == [] and data['evilReal'] == [] and data['evilCount'] == 21, f"every Minion and Demon has 1-2 evil coaching lines ({data['evilMissing']}, {data['evilCount']})")
+    check(data['longest'] <= 30, f"coaching fields stay short (longest {data['longest']} words)")
+    check(5 <= data['basics'] <= 7, 'bluffing basics has 5 to 7 principles')
+    check(data['teamKeys'] == 'outsider,townsfolk' and data['nullFor'] == [None, None, None, None], 'team fallback exists and Drunk, Lunatic and evil characters have no bluff coaching')
+
+    fb = page.evaluate("""() => {
+      const sc = { name: 'Custom', characters: ['zz_seer', 'zz_once', 'zz_out', 'zz_evil'], custom: {
+        zz_seer: { name: 'Seer <b>X</b>', team: 'townsfolk', ability: 'You start knowing a secret thing.' },
+        zz_once: { name: 'Oncer', team: 'townsfolk', ability: 'Once per game, at night, do a thing.' },
+        zz_out: { name: 'Odd Out', team: 'outsider', ability: 'Each night*, do a thing.' },
+        zz_evil: { name: 'Bad One', team: 'minion', ability: 'Do evil.' } } };
+      const a = Engine.coachFor('zz_seer', sc), b = Engine.coachFor('zz_once', sc), c = Engine.coachFor('zz_out', sc);
+      return { a, b, c, evil: Engine.coachFor('zz_evil', sc), none: Engine.evilCoachFor('zz_evil'), real: Engine.coachFor('chef', sc).generic };
+    }""")
+    check(fb['a']['generic'] and 'Night 1 info' in fb['a']['prep'] and fb['b']['generic'] and 'one use' in fb['b']['prep'] and 'Night 2' in fb['c']['prep'] and 'Outsider' in fb['c']['risk'], 'a custom character gets general advice shaped by its ability wording')
+    check(fb['evil'] is None and fb['none'] is None and fb['real'] is False, 'custom evil characters get no bluff advice; official ones keep their own entry')
+    check('Seer <b>X</b>' in fb['a']['say'][0] and all(f in fb['a'] for f in ['pitch', 'say', 'reveal', 'prep', 'risk']), 'fallback has all five fields and does not invent specifics')
+
+    # ── Phase 6: coachNow situations ──
+    cn = page.evaluate("""() => {
+      const sc = SCRIPTS['trouble-brewing'];
+      const mk = (n) => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i, claims: [], dead: false, death: null, gut: 0, lock: '', notes: '' }));
+      const game = (cover, build = () => {}, o = {}) => {
+        const s = { players: mk(8), meId: 'p0', myChar: 'imp', myAlign: 'evil', knownEvil: ['p3'], knownDemon: null, phase: { kind: 'day', n: 1 },
+          evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] }, gameOver: false, ...o };
+        if (cover) s.players[0].claims = [{ char: cover, when: { kind: 'day', n: 1 } }];
+        build(s); return s;
+      };
+      const kill = (s, i) => { s.players[i].dead = true; s.players[i].death = { how: 'night', when: { kind: 'night', n: 1 } }; };
+      const run = (s) => Engine.coachNow(s, sc);
+      const all = (s) => run(s).map(i => i.title + ' | ' + i.text).join('\\n');
+      const out = {};
+      out.noCoverN1 = all(game('', s => {}, { phase: { kind: 'night', n: 1 } }));
+      out.noCoverD1 = all(game('', s => {}, { phase: { kind: 'day', n: 1 } }));
+      out.noCoverD3 = all(game('', s => {}, { phase: { kind: 'day', n: 3 } }));
+      out.noCoverBluffs = all(game('', s => { s.bluff.demonBluffs = ['monk']; }, { phase: { kind: 'night', n: 1 } }));
+      out.noCoverGood = all(game('', s => {}, { myChar: 'empath', myAlign: 'good' }));
+      out.prepMonk = all(game('monk', s => {}, { phase: { kind: 'day', n: 3 } }));
+      out.prepChef = all(game('chef', s => {}, { phase: { kind: 'day', n: 2 } }));
+      out.night1Chef = all(game('chef', s => {}, { phase: { kind: 'night', n: 1 } }));
+      out.night1Monk = all(game('monk', s => {}, { phase: { kind: 'night', n: 1 } }));
+      out.nightLater = all(game('empath', s => {}, { phase: { kind: 'night', n: 3 } }));
+      out.team = all(game('chef', s => { s.players[3].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }));
+      out.rival = all(game('chef', s => { s.players[2].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }));
+      out.rivalBluff = all(game('monk', s => { s.bluff.demonBluffs = ['monk']; s.players[2].claims = [{ char: 'monk', when: { kind: 'day', n: 1 } }]; }));
+      out.rivalGood = all(game('chef', s => { s.players[2].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }]; }, { myChar: 'empath', myAlign: 'good' }));
+      out.offScript = all(game('clockmaker'));
+      out.block = all(game('saint', s => { s.noms = [{ id: 'n1', day: 1, nominator: 'p2', nominee: 'p0', voters: [], votes: 4, executed: false }]; }));
+      out.blockGood = all(game('chef', s => { s.noms = [{ id: 'n1', day: 1, nominator: 'p2', nominee: 'p0', voters: [], votes: 4, executed: false }]; }, { myChar: 'empath', myAlign: 'good' }));
+      out.blockTruth = all(game('empath', s => { s.noms = [{ id: 'n1', day: 1, nominator: 'p2', nominee: 'p0', voters: [], votes: 4, executed: false }]; }, { myChar: 'empath', myAlign: 'good' }));
+      out.nominated = all(game('chef', s => { s.noms = [{ id: 'n1', day: 1, nominator: 'p2', nominee: 'p0', voters: [], votes: 1, executed: false }]; }));
+      out.otherNom = all(game('chef', s => { s.noms = [{ id: 'n1', day: 1, nominator: 'p2', nominee: 'p1', voters: [], votes: 5, executed: false }]; }));
+      out.final4Evil = all(game('chef', s => { kill(s, 4); kill(s, 5); kill(s, 6); kill(s, 7); }, { phase: { kind: 'day', n: 3 } }));
+      out.final4Good = all(game('chef', s => { kill(s, 4); kill(s, 5); kill(s, 6); kill(s, 7); }, { phase: { kind: 'day', n: 3 }, myChar: 'empath', myAlign: 'good' }));
+      const f3 = (o, cover = 'chef') => game(cover, s => { for (let i = 3; i < 8; i++) kill(s, i); s.players[0].dead = false; }, { phase: { kind: 'day', n: 4 }, ...o });
+      out.final3Evil = all(f3({ myChar: 'poisoner', knownEvil: ['p1'] }));
+      out.final3Demon = all(f3({}));
+      out.final3Mayor = all(f3({ knownEvil: ['p1'] }, 'mayor'));
+      out.final3Good = all(f3({ myChar: 'empath', myAlign: 'good' }));
+      out.final3Bluffer = all(f3({ myChar: 'empath', myAlign: 'good' }));
+      out.final5 = all(game('chef', s => { kill(s, 5); kill(s, 6); kill(s, 7); }, { phase: { kind: 'day', n: 3 } }));
+      out.dead = all(game('chef', s => { s.players[0].dead = true; s.players[0].death = { how: 'execution', when: { kind: 'day', n: 2 } }; }, { phase: { kind: 'night', n: 2 } }));
+      out.deadSpent = all(game('chef', s => { s.players[0].dead = true; s.players[0].deadVoteUsed = true; s.players[0].death = { how: 'execution', when: { kind: 'day', n: 2 } }; }, { phase: { kind: 'night', n: 2 } }));
+      out.evilGeneral = all(game('chef', s => {}, { myChar: 'poisoner', phase: { kind: 'day', n: 2 } }));
+      out.demonGeneral = all(game('chef', s => {}, { phase: { kind: 'day', n: 2 } }));
+      out.goodGeneral = all(game('chef', s => {}, { myChar: 'empath', myAlign: 'good', phase: { kind: 'day', n: 2 } }));
+      out.scarlet4 = all(game('chef', s => { kill(s, 4); kill(s, 5); kill(s, 6); kill(s, 7); }, { phase: { kind: 'day', n: 3 }, myChar: 'scarletwoman' }));
+      out.noSetup = Engine.coachNow({ players: [], phase: { kind: 'night', n: 1 }, bluff: { demonBluffs: [], plan: [] } }, sc);
+      out.over = Engine.coachNow(game('chef', s => {}, { gameOver: true }), sc);
+      const heavy = game('saint', s => {
+        s.players[2].claims = [{ char: 'saint', when: { kind: 'day', n: 1 } }]; s.players[3].claims = [{ char: 'saint', when: { kind: 'day', n: 1 } }];
+        s.players[0].claims = [{ char: 'chef', when: { kind: 'day', n: 1 } }, { char: 'saint', when: { kind: 'day', n: 2 } }];
+        s.noms = [{ id: 'n1', day: 3, nominator: 'p2', nominee: 'p0', voters: [], votes: 4, executed: false }];
+        s.bluff.plan = [{ id: 'a', when: { kind: 'night', n: 1 }, kind: 'learned', targets: [], char: '', text: 'x' }];
+        for (let i = 4; i < 8; i++) kill(s, i);
+      }, { phase: { kind: 'day', n: 3 } });
+      out.heavyN = run(heavy).length;
+      out.heavyTitles = run(heavy).map(i => i.title);
+      out.shapes = [].concat(run(heavy), Engine.coachNow(game('chef'), sc)).every(i => ['bad', 'warn', 'info', 'good'].includes(i.level) && typeof i.title === 'string' && typeof i.text === 'string' && Object.keys(i).length === 3);
+      out.maxLen = Math.max(...[heavy, game(''), game('monk')].map(g => run(g).length));
+      const before = JSON.stringify(heavy); run(heavy); out.pure = before === JSON.stringify(heavy);
+      return out;
+    }""")
+    has = lambda k, *needles: all(n in cn[k] for n in needles)
+    check(has('noCoverN1', 'Pick a cover', 'before the first day'), 'coach: no cover on Night 1 says pick one before the first day talk')
+    check(has('noCoverD1', 'Pick a cover', 'Day 1') and has('noCoverD3', 'Day 3'), 'coach: no cover on Day 1 and later days is situational')
+    check(has('noCoverBluffs', "Demon's bluffs"), 'coach: no cover with Demon bluffs known points to them')
+    check('Pick a cover' not in cn['noCoverGood'] and 'No claim yet' in cn['noCoverGood'], 'coach: a good player with no claim is not told to bluff')
+    check(has('prepMonk', 'Prepare Night 2, Night 3', 'Monk', 'protected player'), 'coach: missing nights are named, with the cover role\'s preparation')
+    check(has('prepChef', 'Prepare Night 1', 'Chef', 'number'), 'coach: Chef cover with no story needs Night 1 prepared')
+    check(has('night1Chef', 'Before Day 1', 'Night 1') and has('night1Monk', 'Before Day 1', 'nothing you must report from Night 1'), 'coach: Night 1 differs by whether the cover has Night 1 info')
+    check(has('nightLater', 'Plan tomorrow', 'Night 3'), 'coach: later nights ask you to plan the next story')
+    check(has('team', 'Double claim with your teammate', 'P3', 'private'), 'coach: double claim with an evil teammate says settle it privately')
+    check(has('rival', 'Double claim', 'could be the real one') and 'teammate' not in cn['rival'], 'coach: double claim with someone else is handled differently')
+    check(has('rivalBluff', "Demon's bluffs", 'Drunk'), 'coach: a double claim on a Demon bluff mentions the Drunk caveat')
+    check(has('rivalGood', 'Double claim', 'Give your details first') and 'Do not fight' not in cn['rivalGood'], 'coach: a good bluffer with a rival claimant gets good-side advice')
+    check(has('offScript', 'Change your cover'), 'coach: a serious conflict gets an action, not only a warning')
+    check(has('block', 'You are on the block', 'Saint', 'loses the game', 'teammate'), 'coach: on the block (evil, Saint cover)')
+    check(has('blockGood', 'on the block', 'real role') and has('blockTruth', 'exactly what you learned'), 'coach: on the block for a good bluffer and a truthful good player')
+    check(has('nominated', 'nominated today') and 'on the block' not in cn['nominated'], 'coach: nominated but not on the block')
+    check('nominated today' not in cn['otherNom'] and 'on the block' not in cn['otherNom'], 'coach: someone else on the block does not trigger')
+    check(has('final4Evil', '4 alive', 'Final 3', 'Demon') and has('final4Good', '4 alive', 'wrong execution'), 'coach: 4 alive differs for evil and good')
+    check(has('final3Evil', 'Final 3', 'Keep the vote off your Demon') and has('final3Demon', 'Final 3', 'you win after the night kill') and has('final3Good', 'Final 3', 'Mayor', 'Do not skip the vote'), 'coach: Final 3 differs for a Minion, the Demon and a good player')
+    check(has('final3Mayor', 'Mayor claim fits'), 'coach: a Mayor cover at Final 3 gets Mayor-specific advice')
+    check(has('final3Bluffer', 'Come clean now') and 'Come clean now' not in cn['final3Evil'], 'coach: a good bluffer at Final 3 is told to come clean')
+    check('4 alive' not in cn['final5'] and 'Final 3' not in cn['final5'], 'coach: no endgame advice at 5 alive')
+    check(has('dead', 'You are dead', 'ghost vote', 'story straight') and has('deadSpent', 'already spent'), 'coach: dead players keep talking, have a ghost vote, and keep the story straight')
+    check('Prepare' not in cn['dead'] and 'Plan tomorrow' not in cn['dead'], 'coach: a dead player is not asked to prepare nightly info')
+    check(has('evilGeneral', 'Protect your Demon', 'same way as your team') and has('demonGeneral', 'stay low'), 'coach: evil players are told not to vote in lockstep')
+    check(has('goodGeneral', 'Come clean on purpose', 'believed'), 'coach: a good bluffer is told why to bluff and when to come clean')
+    check(has('scarlet4', 'Scarlet Woman', '5 or more'), 'coach: Scarlet Woman at 4 alive loses her backup')
+    check(cn['noSetup'][0]['title'] == 'Set yourself up' and cn['over'][0]['title'] == 'Game over', 'coach: handles no setup and a finished game')
+    check(cn['heavyN'] == 4 and cn['maxLen'] <= 4 and cn['shapes'] and cn['pure'], f"coach: at most 4 plain items, {{level,title,text}} only, and the state is not changed ({cn['heavyTitles']})")
+    check(cn['heavyTitles'][0] == 'You are on the block', 'coach: the most urgent item comes first')
+
+    # ── Phase 6: coaching in the UI ──
+    seed2 = {'v': 3, 'players': [{'id': f'p{i}', 'name': n, 'claims': []} for i, n in enumerate(NAMES)], 'meId': 'p0', 'myChar': 'imp', 'myAlign': 'evil',
+             'knownEvil': ['p3'], 'phase': {'kind': 'day', 'n': 1}, 'evidence': [], 'noms': [], 'notes': [], 'tab': 'bluff',
+             'bluff': {'demonBluffs': ['soldier', 'chef', 'monk'], 'plan': []}}
+    seed2['players'][0]['claims'] = [{'char': 'monk', 'when': {'kind': 'day', 'n': 1}}]
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.evaluate("(s) => localStorage.setItem('botc-companion-v1', JSON.stringify(s))", seed2); page.reload()
+    view = lambda: page.locator('#view').inner_text()
+    check(page.locator('#coach-card').is_visible() and 'What to do now' in page.locator('#coach-card').inner_text(), 'studio shows the Coach card')
+    order = page.evaluate("[...document.querySelectorAll('#view > .card')].map(c => c.id || (c.querySelector('h2,h3') || {}).textContent)")
+    check(order[0] == 'Bluff Studio' and order[1] == 'coach-card' and order[2] == 'how-card', f'coach sits under the identity card, then the bluff panel ({order[:3]})')
+    check(1 <= page.locator('#coach-card .tip.coach').count() <= 4, 'coach card lists 1 to 4 items')
+    how = page.locator('#how-card')
+    check('Monk' in how.locator('h3').inner_text() and page.locator('#how-card .say-line').count() >= 1, 'the how-to panel is for the current cover and shows say lines')
+    lbls = how.locator('.lbl').all_inner_texts()
+    check([l.lower() for l in lbls] == ['say', 'reveal', 'prepare', 'risk'], f'how-to panel has say / reveal / prepare / risk labels ({lbls})')
+    check('Protected' in how.inner_text() or 'protected' in how.inner_text(), 'the how-to panel carries the Monk text')
+    check(page.locator('.evil-note').count() == 1 and 'Night 2 on' in page.locator('.evil-note').inner_text(), 'an evil player sees their evil-role note')
+    n_opts = page.locator('.bluff-opt').count()
+    check(page.locator('.bluff-opt details.coach-x').count() == n_opts and n_opts >= 5, 'every ranked bluff has a Coaching expander')
+    check(page.locator('.bluff-opt details.coach-x[open]').count() == 0, 'coaching expanders start collapsed')
+    page.locator('details.pick-off > summary').first.click()
+    check(page.locator('.bluff-opt details.coach-x').count() > 5 and page.locator('details.rule.flat:not([open])').count() == 1, 'all other bluffs are coached too, and Bluffing basics is collapsed')
+    page.locator('details.rule.flat > summary').click()
+    check(5 <= page.locator('.basics li').count() <= 7 and page.locator('.basics').is_visible(), 'Bluffing basics opens with 5 to 7 principles')
+    page.locator('.bluff-opt details.coach-x > summary').first.click()
+    exp_text = page.locator('.bluff-opt details.coach-x[open]').first.inner_text()
+    check('Why:' in exp_text and 'Watch for:' in exp_text, 'an opened Coaching expander shows the pitch and the risk')
+
+    snap = lambda: page.evaluate("(() => { const s = JSON.parse(JSON.stringify(window.__companion.state)); delete s.tab; return JSON.stringify(s); })()")
+    saved = lambda: page.evaluate("(() => { const s = JSON.parse(localStorage.getItem('botc-companion-v1')); delete s.tab; return JSON.stringify(s); })()")
+    state0, saved0, depth0 = snap(), saved(), page.evaluate('window.__companion.undoDepth')
+    page.click('[data-tab="guide"]'); page.click('[data-tab="bluff"]')
+    check(page.locator('.bluff-opt details.coach-x[open]').count() == 1 and page.locator('.basics').is_visible(), 'open expanders survive a re-render')
+    page.locator('.bluff-opt details.coach-x > summary').nth(1).click(); page.locator('.bluff-opt details.coach-x > summary').nth(1).click()
+    check(snap() == state0 and saved() == saved0 and page.evaluate('window.__companion.undoDepth') == depth0, 'opening and closing coaching changes neither state, saved game nor undo depth')
+    check('coach' not in state0.lower() and 'pitch' not in state0 and 'say-line' not in saved0, 'coaching adds nothing to the saved game')
+    check(page.locator('.toast').count() == 0, 'expanders raise no toast')
+
+    # names are escaped
+    page.evaluate("""() => { const s = window.__companion.state; s.players[2].name = '<img src=x onerror="window.__xss2=1">'; s.players[2].claims = [{ char: 'monk', when: { kind: 'day', n: 1 } }]; }""")
+    page.click('[data-tab="guide"]'); page.click('[data-tab="bluff"]'); page.wait_for_timeout(100)
+    check(page.evaluate('window.__xss2 === undefined') and page.locator('#coach-card img, #how-card img').count() == 0 and '<img' in page.locator('#coach-card').inner_text(), 'names in coaching are escaped')
+    page.evaluate("""() => { const s = window.__companion.state; s.players[2].name = 'Cat'; s.players[2].claims = []; }""")
+
+    # Town and Suspects stay free of coaching
+    for tab in ['town', 'read']:
+        page.click(f'[data-tab="{tab}"]'); page.wait_for_timeout(80)
+        body = page.locator('body').inner_text().lower()
+        free = not any(w in body for w in ['what to do now', 'how to play this bluff', 'how to bluff', 'bluffing basics', 'coaching']) and page.locator('.say-line, .coach-x').count() == 0
+        check(free, f'{tab} tab shows no coaching')
+    page.click('[data-tab="bluff"]')
+
+    # Guide: neutral reference, same for every good character
+    page.click('[data-tab="guide"]')
+    g = page.evaluate("""() => ({ n: document.querySelectorAll('details.coach-x.in-guide').length, good: [...document.querySelectorAll('details.char')].filter(d => d.querySelector('.team-townsfolk, .team-outsider')).length,
+      evil: [...document.querySelectorAll('details.char')].filter(d => d.querySelector('.team-minion, .team-demon') && d.querySelector('.coach-x')).length,
+      label: document.querySelector('details.coach-x.in-guide > summary').textContent, mineOpen: document.querySelectorAll('details.coach-x.in-guide[open]').length })""")
+    check(g['n'] == 16 and g['evil'] == 0 and g['label'] == 'How to bluff this' and g['mineOpen'] == 0, f"Guide has a collapsed 'How to bluff this' on each bluffable good character only ({g})")
+    page.locator('details.char:has(.team-townsfolk) summary').first.click()
+    page.locator('details.coach-x.in-guide > summary').first.click()
+    gtxt = page.locator('details.coach-x.in-guide[open]').first.inner_text().lower()
+    check(all(w in gtxt for w in ['say', 'reveal', 'prepare', 'risk']) and page.locator('details.char .say-line:visible').count() >= 1, 'Guide expander shows the say / reveal / prepare / risk text')
+    check(page.locator('mark, .mine-cover, .your-cover').count() == 0, 'Guide does not highlight your cover')
+    # Guide with a good player's own character does not differ for the cover
+    page.click('[data-tab="bluff"]')
+
+    # Layout and touch targets
+    for w, h, tag in [(360, 780, 'phone'), (390, 844, 'phone'), (768, 1024, 'tablet'), (820, 1180, 'tablet'), (1024, 768, 'tablet'), (1180, 820, 'tablet')]:
+        page.set_viewport_size({'width': w, 'height': h}); page.wait_for_timeout(220)
+        page.click('[data-tab="bluff"]')
+        check(page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'studio with coaching fits at {w}px')
+        small = page.evaluate("""() => [...document.querySelectorAll('#view details.coach-x > summary, #view details.rule.flat > summary')].filter(e => e.getBoundingClientRect().height < 43.5).length""")
+        check(small == 0, f'coaching expanders keep 44px targets at {w}px')
+        over = page.evaluate("""() => [...document.querySelectorAll('#coach-card *, #how-card *, .bluff-opt *')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.right > innerWidth + 1; }).length""")
+        check(over == 0, f'no coaching element overflows at {w}px')
+        if w == 360:
+            page.screenshot(path=str(SHOTS / '20-coach-phone-360.png'), full_page=True)
+        if (w, h) == (390, 844):
+            page.screenshot(path=str(SHOTS / '20-coach-phone.png'))
+            page.screenshot(path=str(SHOTS / '21-coach-phone-full.png'), full_page=True)
+        if w == 768:
+            page.screenshot(path=str(SHOTS / '22-coach-tablet.png'), full_page=True)
+    page.click('[data-tab="guide"]')
+    for w, h in [(360, 780), (768, 1024), (1180, 820)]:
+        page.set_viewport_size({'width': w, 'height': h}); page.wait_for_timeout(200)
+        check(page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'guide with coaching fits at {w}px')
+    page.set_viewport_size({'width': 390, 'height': 844}); page.wait_for_timeout(200)
+    page.click('[data-tab="bluff"]')
+
+    # Offline bundle and cache
+    sw = page.evaluate("fetch('sw.js').then(r => r.text())")
+    check("clocktower-companion-v6" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the v6 cache')
+    check(page.evaluate("document.querySelector('script[src=\"js/coach.js\"]') !== null && [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/coach.js') < [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/engine.js')"), 'coach.js loads before engine.js')
+
+    # ── Endgame coaching follows the win condition ──
+    endgame = page.evaluate("""() => {
+      const sc = SCRIPTS['trouble-brewing'];
+      const game = (alive, kind, myChar, myAlign) => {
+        const players = Array.from({ length: 8 }, (_, i) => ({ id: 'e' + i, name: 'E' + i, claims: [], dead: i >= alive, death: i >= alive ? { how: 'night', when: { kind: 'night', n: 1 } } : null, gut: 0, lock: '', notes: '' }));
+        players[0].claims = [{ char: 'soldier', when: { kind: 'day', n: 1 } }];
+        return { players, meId: 'e0', myChar, myAlign, knownEvil: [], knownDemon: null, phase: { kind, n: 4 }, evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] } };
+      };
+      const text = (s, title) => (Engine.coachNow(s, sc).find(i => i.title === title) || {}).text || '';
+      return {
+        fourDayGood: text(game(4, 'day', 'chef', 'good'), '4 alive'), fourDayEvil: text(game(4, 'day', 'imp', 'evil'), '4 alive'),
+        fourNight: text(game(4, 'night', 'chef', 'good'), '4 alive'), threeDay: text(game(3, 'day', 'chef', 'good'), 'Final 3'), threeNight: text(game(3, 'night', 'chef', 'good'), 'Final 3'),
+        oldTip: Engine.tips(game(4, 'day', 'chef', 'good'), sc, null).map(t => t.text).find(t => t.includes('4 players alive')),
+        mutant: Engine.coachFor('mutant', SCRIPTS['sects-violets']).risk,
+      };
+    }""")
+    check("tonight's kill ends the game" in endgame['fourDayGood'], 'at 4 alive, good is told a wrong execution loses to the night kill')
+    check("tonight's kill wins" in endgame['fourDayEvil'], 'at 4 alive, evil is told a missed execution wins the game')
+    check("tomorrow's execution decides" in endgame['fourNight'], 'a night at 4 alive leads to a deciding execution')
+    check('wrong player ends the game' in endgame['threeDay'], 'Final 3 warns about a wrong execution')
+    check('only 2 players remain' in endgame['threeNight'] and 'today' not in endgame['threeNight'], 'a night at 3 alive explains the kill ends the game')
+    check("tonight's kill can end the game" in endgame['oldTip'], 'the Suspects tip gives the same 4-alive rule')
+    check('avoids admitting' in endgame['mutant'], 'Mutant coaching follows the madness rule')
+
+    day1 = page.evaluate("""() => {
+      const sc = SCRIPTS['trouble-brewing'];
+      const game = (cover) => ({ players: Array.from({ length: 8 }, (_, i) => ({ id: 'd' + i, name: 'D' + i, claims: i ? [] : [{ char: cover, when: { kind: 'day', n: 1 } }], dead: false, death: null, gut: 0, lock: '', notes: '' })),
+        meId: 'd0', myChar: 'imp', myAlign: 'evil', knownEvil: [], knownDemon: null, phase: { kind: 'day', n: 1 }, evidence: [], noms: [], notes: [], bluff: { demonBluffs: [], plan: [] } });
+      const text = (c) => (Engine.coachNow(game(c), sc).find(i => i.title === 'Day 1 talk') || {}).text || '';
+      return { monk: text('monk'), chef: text('chef') };
+    }""")
+    check('does not act on Night 1' in day1['monk'], 'Day 1 coaching stops a Monk claiming a Night 1 action')
+    check('does not act' not in day1['chef'] and day1['chef'] != '', 'Day 1 coaching leaves Night 1 roles alone')
+
     check(not errors, f'no console errors {errors}')
     browser.close()
 

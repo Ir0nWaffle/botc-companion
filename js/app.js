@@ -14,6 +14,22 @@
   try { state = Engine.sanitizeGame(JSON.parse(localStorage.getItem(KEY)), freshState()); } catch { state = freshState(); }
   let uiTab = state.players.length ? (state.tab === 'setup' ? 'town' : state.tab) : 'setup';
   let analysisCache = { key: null, value: null };
+  // Which coaching expanders are open. In memory only: never saved, and never an undo step.
+  const openCoach = new Set();
+  const ckAttr = (key) => `data-ck="${esc(key)}" ${openCoach.has(key) ? 'open' : ''}`;
+  document.addEventListener('toggle', (e) => {
+    const k = e.target && e.target.dataset && e.target.dataset.ck;
+    if (k) { if (e.target.open) openCoach.add(k); else openCoach.delete(k); }
+  }, true);
+  const sayHtml = (lines) => lines.map(l => `<div class="say-line">&ldquo;${esc(l)}&rdquo;</div>`).join('');
+  function howHtml(c) {
+    return `<div class="how">
+      <div class="lbl">Say</div>${sayHtml(c.say)}
+      <div class="lbl">Reveal</div><p>${esc(c.reveal)}</p>
+      <div class="lbl">Prepare</div><p>${esc(c.prep)}</p>
+      <div class="lbl risk">Risk</div><p>${esc(c.risk)}</p>
+      ${c.generic ? '<p class="faint">General advice for this kind of character. There are no notes for this specific one.</p>' : ''}</div>`;
+  }
 
   function save() { dropStaleUndo(); try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} }
   function commit() { save(); render(); }
@@ -556,11 +572,16 @@
       : !check.isBluff ? '<div class="tip good">You are telling the truth about your role, so there is nothing to keep straight.</div>'
       : `${check.issues.filter(i => i.level === 'good').map(i => `<div class="tip good">${esc(i.text)}</div>`).join('')}
          ${issues.length ? issues.map(i => `<div class="tip ${tipClass[i.level]}">${esc(i.text)}</div>`).join('') : '<div class="tip good">No conflicts with anything logged so far.</div>'}`;
+    const coachExpander = (id) => {
+      const c = Engine.coachFor(id, sc);
+      return c ? `<details class="coach-x" ${ckAttr('opt:' + id)}><summary>Coaching</summary><p><b>Why:</b> ${esc(c.pitch)}</p><p><b>Watch for:</b> ${esc(c.risk)}</p></details>` : '';
+    };
     const optionCard = (o) => `<div class="bluff-opt">
       <span class="pk-ico">${icon(o.id)}</span>
       <div class="grow"><div class="row between"><b class="team-${o.team}">${esc(o.name)}</b><span class="rating ${o.rating}">${{ strong: 'Strong', okay: 'Okay', risky: 'Risky' }[o.rating]}</span></div>
         <div class="faint">${esc(o.ability)}</div>
         <ul class="why">${o.reasons.map(r => `<li class="${r.good ? 'up' : 'down'}">${esc(r.text)}</li>`).join('')}</ul>
+        ${coachExpander(o.id)}
         <button type="button" class="btn small ${o.id === cover ? '' : 'primary'}" data-act="use-bluff" data-char="${esc(o.id)}" ${o.id === cover ? 'disabled' : ''}>${o.id === cover ? 'Your current claim' : 'Use this bluff'}</button>
       </div></div>`;
     const myTeam = real ? real.team : '';
@@ -571,6 +592,7 @@
         <div><label class="field" for="claim-btn">What you are telling the table</label>${pickField(cover, 'claim', '— no claim —', `data-pid="${m.id}"`)}</div>
         ${coverInfo && check.isBluff ? `<div class="faint"><b class="team-${coverInfo.team}">${esc(coverInfo.name)}</b>: ${esc(coverInfo.ability)}</div>` : ''}
       </div>
+      ${coachCardHtml(check, cover, coverInfo, sc)}
       <div class="card"><h3>Story check</h3>${status}</div>
       ${isEvilMe() ? `<div class="card"><h3>The Demon's 3 bluffs</h3>
         <p class="faint" style="margin-top:0">${myTeam === 'demon' ? 'The Storyteller shows you these on Night 1. They are not in play, so they are your safest claims.' : 'If your Demon shares them, record them here. They are not in play, so they are the safest claims.'}</p>
@@ -583,7 +605,21 @@
       <div class="card"><h3>Best bluffs right now</h3>
         ${options.slice(0, 5).map(optionCard).join('') || '<div class="empty">No good characters left to claim.</div>'}
         ${options.length > 5 ? `<details class="pick-off"><summary>All other characters <span class="faint">(${options.length - 5})</span></summary>${options.slice(5).map(optionCard).join('')}</details>` : ''}
-      </div>`;
+      </div>
+      <div class="card"><details class="rule flat" ${ckAttr('basics')}><summary>Bluffing basics</summary>
+        <ol class="basics">${BLUFF_BASICS.map(b => `<li><b>${esc(b.title)}.</b> ${esc(b.text)}</li>`).join('')}</ol></details></div>`;
+  }
+
+  function coachCardHtml(check, cover, coverInfo, sc) {
+    const cls = { bad: 'warn', warn: 'caution', info: 'info', good: 'good' };
+    const items = Engine.coachNow(state, sc);
+    const evilNote = isEvilMe() && state.myChar ? Engine.evilCoachFor(state.myChar) : null;
+    const how = cover && check.isBluff ? Engine.coachFor(cover, sc) : null;
+    return `<div class="card" id="coach-card"><h3>What to do now</h3>
+        ${items.map(i => `<div class="tip coach ${cls[i.level] || 'info'}"><b>${esc(i.title)}</b> ${esc(i.text)}</div>`).join('')}
+        ${evilNote ? `<div class="evil-note"><div class="lbl">As the ${esc(ci(state.myChar).name)}</div>${evilNote.map(t => `<p>${esc(t)}</p>`).join('')}</div>` : ''}
+      </div>
+      ${how ? `<div class="card" id="how-card"><h3>How to play this bluff: ${esc(coverInfo.name)}</h3>${howHtml(how)}</div>` : ''}`;
   }
 
   // ── Info log ─────────────────────────────────────────────────────────────
@@ -911,10 +947,12 @@
 
   // ── Guide ────────────────────────────────────────────────────────────────
   let guideFilter = '';
-  function charCard(c, open = false) {
+  function charCard(c, open = false, ns = '') {
+    const how = Engine.coachFor(c.id, script());
     const tips = { play: c.play || (TEAM_TIPS[c.team] || {}).play, spot: c.spot || (TEAM_TIPS[c.team] || {}).spot };
     return `<details class="char" ${open ? 'open' : ''}><summary><span class="ico">${icon(c.id)}</span><span class="grow"><b class="team-${c.team}">${esc(c.name)}</b><div class="ab">${esc(c.ability)}</div></span></summary>
-      <div class="body">${tips.play ? `<p><b>If you are the ${esc(c.name)}:</b> ${esc(tips.play)}</p>` : ''}${tips.spot ? `<p><b>If someone claims it:</b> ${esc(tips.spot)}</p>` : ''}</div></details>`;
+      <div class="body">${tips.play ? `<p><b>If you are the ${esc(c.name)}:</b> ${esc(tips.play)}</p>` : ''}${tips.spot ? `<p><b>If someone claims it:</b> ${esc(tips.spot)}</p>` : ''}</div>
+      ${how ? `<details class="coach-x in-guide" ${ckAttr('guide:' + ns + c.id)}><summary>How to bluff this</summary>${howHtml(how)}</details>` : ''}</details>`;
   }
   function viewGuide() {
     const sc = script();
@@ -922,7 +960,7 @@
     const chars = sc.characters.map(ci).filter(c => !q || c.name.toLowerCase().includes(q) || (c.ability || '').toLowerCase().includes(q));
     const mine = state.myChar ? ci(state.myChar) : null;
     return `
-      ${mine ? `<h2>Your character</h2>${charCard(mine, true)}` : ''}
+      ${mine ? `<h2>Your character</h2>${charCard(mine, true, 'mine:')}` : ''}
       <h2>${esc(sc.name)}</h2>
       <input type="text" class="search" placeholder="Search characters…" value="${esc(guideFilter)}" data-input="guide-filter">
       ${TEAMS.filter(t => chars.some(c => c.team === t)).map(t => `<h3 class="team-${t}" style="margin-top:14px">${TEAM_LABEL[t]}</h3>${chars.filter(c => c.team === t).map(c => charCard(c)).join('')}`).join('')}
