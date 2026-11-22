@@ -42,6 +42,60 @@
     }
   }
   let state = loadSaved();
+  // Saved custom scripts live apart from the game, so they survive New game and can be reused at any table.
+  const LIB_KEY = 'botc-companion-scripts';
+  let libraryOk = true;
+  function readLibrary() {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(LIB_KEY);
+      const list = JSON.parse(raw || '[]');
+      if (!Array.isArray(list)) throw new Error('not a list');
+      return list.map(Engine.sanitizeScript).filter(x => x && x.libId && x.characters.length);
+    } catch {
+      try { if (raw !== null) localStorage.setItem(LIB_KEY + '-damaged', raw); } catch { /* storage unavailable */ }
+      return [];
+    }
+  }
+  let library = readLibrary();
+  const scriptKey = (x) => JSON.stringify([x.name, x.characters, x.custom]);
+  function writeLibrary(next) {
+    library = next;
+    try { localStorage.setItem(LIB_KEY, JSON.stringify(next)); libraryOk = true; } catch { libraryOk = false; }
+  }
+  // Add or update a script in the library. Only definitions for characters on the script are kept.
+  function storeScript(sc) {
+    const fresh = readLibrary();
+    const custom = Object.fromEntries(Object.entries(sc.custom || {}).filter(([id]) => sc.characters.includes(id)));
+    const clean = Engine.sanitizeScript({ ...sc, custom });
+    const twin = clean.libId ? null : fresh.find(x => scriptKey(x) === scriptKey(clean));
+    const entry = { ...clean, libId: clean.libId || (twin ? twin.libId : uid()) };
+    writeLibrary(fresh.some(x => x.libId === entry.libId) ? fresh.map(x => (x.libId === entry.libId ? entry : x)) : [...fresh, entry]);
+    return entry;
+  }
+  const inLibrary = (sc) => !!sc && !!sc.libId && library.some(x => x.libId === sc.libId);
+  // Definitions of characters the game already mentions stay readable after the script changes.
+  function withLeftovers(next) {
+    const old = (state.customScript && state.customScript.custom) || {};
+    const used = [...state.players.flatMap(p => p.claims.map(c => c.char)), state.myChar, ...state.evidence.map(e => e.char), ...state.notes.map(n => n.char), ...state.bluff.plan.map(n => n.char), ...state.bluff.demonBluffs];
+    const custom = { ...next.custom };
+    used.forEach((id) => { if (id && old[id] && !custom[id]) custom[id] = old[id]; });
+    return { ...next, custom };
+  }
+  // A script that only exists inside this game is put in the library before another one replaces it.
+  function archiveCurrent(nextLibId) {
+    const cur = state.customScript;
+    if (cur && cur.characters.length && cur.libId !== nextLibId && !inLibrary(cur)) storeScript(cur);
+  }
+  function useCustom(sc, archive = true) {
+    if (archive) archiveCurrent(sc.libId);
+    state.customScript = withLeftovers(sc); state.scriptId = 'custom';
+  }
+  window.addEventListener('storage', (e) => {
+    if (e.key !== LIB_KEY) return;
+    library = readLibrary();
+    if (uiTab === 'setup' && $('#sheet').hidden) render();
+  });
   let uiTab = state.players.length ? (state.tab === 'setup' ? 'town' : state.tab) : 'setup';
   let analysisCache = { key: null, value: null };
   // Which coaching expanders are open. In memory only: never saved, and never an undo step.
@@ -84,9 +138,8 @@
 
   const iconKeys = typeof CHARACTER_ICONS !== 'undefined' ? Object.keys(CHARACTER_ICONS) : [];
   const iconLower = Object.fromEntries(iconKeys.map(k => [k.toLowerCase(), k]));
-  function icon(id) {
+  function icon(id, info = id ? ci(id) : null) {
     if (!id) return '<span class="q">?</span>';
-    const info = ci(id);
     const key = ICON_ALIAS[id] || iconLower[id.toLowerCase()] || id;
     try { return getCharacterIconSVG(key, info.team); } catch { return '<span class="q">?</span>'; }
   }
@@ -263,8 +316,10 @@
   // ── Setup ────────────────────────────────────────────────────────────────
   function scriptOptions() {
     const opts = Object.entries(SCRIPTS).map(([id, s]) => `<option value="${id}" ${state.scriptId === id ? 'selected' : ''}>${esc(s.name)}</option>`);
-    if (state.customScript) opts.push(`<option value="custom" ${state.scriptId === 'custom' ? 'selected' : ''}>${esc(state.customScript.name)} (custom)</option>`);
-    return opts.join('');
+    const activeLib = state.scriptId === 'custom' && state.customScript ? state.customScript.libId : null;
+    const mine = [...library].sort((a, b) => a.name.localeCompare(b.name)).map(x => `<option value="lib:${esc(x.libId)}" ${x.libId === activeLib ? 'selected' : ''}>${esc(x.name)}</option>`);
+    if (state.customScript && !inLibrary(state.customScript)) mine.unshift(`<option value="custom" ${state.scriptId === 'custom' ? 'selected' : ''}>${esc(state.customScript.name)} (from this game)</option>`);
+    return opts.join('') + (mine.length ? `<optgroup label="Your scripts">${mine.join('')}</optgroup>` : '');
   }
   // ── Character picker ─────────────────────────────────────────────────────
   // One reusable layer over whatever is open. It never touches the sheet underneath, so drafts survive.
@@ -379,8 +434,12 @@
       <h2>Game setup</h2>
       <div>
         <label class="field" for="script-sel">Script</label>
-        <div class="row"><select id="script-sel" class="grow" data-change="script">${scriptOptions()}</select>
-        <button class="btn small" data-act="import-script">Import custom…</button></div>
+        <select id="script-sel" data-change="script">${scriptOptions()}</select>
+        <div class="row" style="margin-top:8px">
+          <button class="btn small" data-act="script-new">New script</button>
+          <button class="btn small" data-act="script-edit">${state.scriptId === 'custom' && state.customScript ? 'Edit script' : 'Copy and edit'}</button>
+          <button class="btn small" data-act="import-script">Import file…</button>
+        </div>
         <input type="file" id="script-file" accept=".json,application/json" hidden>
       </div>
     </div>
@@ -1110,16 +1169,21 @@
   }
   function closeSheet() {
     closePicker(false); $('#sheet').hidden = true; $('#sheet-backdrop').hidden = true; $('#sheet').removeAttribute('aria-labelledby');
-    sheetKind = null; shownKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; noteReturn = false; syncLayer(); render();
+    sheetKind = null; shownKind = null; draft = null; nomDraft = null; noteDraft = null; evReturn = null; noteReturn = false; scriptDraft = null; syncLayer(); render();
     const o = sheetOpener; sheetOpener = null; activator = null;
     const back = o && ((o.el && o.el.isConnected ? o.el : null) || (o.key ? document.querySelector(o.key) : null));
     if (back) back.focus({ preventScroll: true });
   }
-  $('#sheet-backdrop').addEventListener('click', closeSheet);
+  // A script being built can take a while, so a stray tap outside the sheet does not throw it away.
+  function requestCloseSheet() {
+    if (sheetKind === 'script' && scriptDraft && scriptDraft.dirty && !confirm('Discard your changes to this script?')) return;
+    closeSheet();
+  }
+  $('#sheet-backdrop').addEventListener('click', requestCloseSheet);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (pickerState) { closePicker(); e.preventDefault(); } // only the picker; the form underneath keeps its draft
-    else if (!$('#sheet').hidden) closeSheet();
+    else if (!$('#sheet').hidden) requestCloseSheet();
   });
   // Keyboard focus stays inside the top layer (the picker, else the sheet): Tab wraps around.
   document.addEventListener('keydown', (e) => {
@@ -1153,6 +1217,148 @@
     else if (sheetKind === 'ev') sheetEvidence();
     else if (sheetKind === 'nom') sheetNom();
     else if (sheetKind === 'note') sheetNote();
+    else if (sheetKind === 'script') sheetScript();
+  }
+
+  // ── Script builder ───────────────────────────────────────────────────────
+  let scriptDraft = null;
+  const blankHomebrew = () => ({ id: null, name: '', team: 'townsfolk', ability: '' });
+  // Scripts store extra characters under normalised ids (lilmonsta, not lilMonsta), the same as an imported script.
+  const extraByNorm = Object.assign(Object.create(null), Object.fromEntries(Object.entries(EXTRA_CHARACTERS).map(([k, v]) => [normName(k), v])));
+  const builderPool = () => [...Object.keys(CHARACTERS), ...Object.keys(extraByNorm).filter(id => !CHARACTERS[id] && extraByNorm[id].team !== 'fabled')];
+  const isHomebrew = (id) => !CHARACTERS[id] && !extraByNorm[id];
+  const draftInfo = (id) => (!scriptDraft.custom[id] && !CHARACTERS[id] && extraByNorm[id] ? { id, ...extraByNorm[id] } : Engine.charInfo(id, { custom: scriptDraft.custom }));
+  function openScriptDraft(src, libId, editing) {
+    scriptDraft = { libId, editing, name: src.name, ids: [...src.characters], custom: JSON.parse(JSON.stringify(src.custom || {})), hb: blankHomebrew(), q: '', only: false, paste: '', dirty: false };
+    sheetKind = 'script'; sheetScript();
+  }
+  function scriptCountsHtml() {
+    const d = scriptDraft, n = { townsfolk: 0, outsider: 0, minion: 0, demon: 0 };
+    d.ids.forEach((id) => { const t = draftInfo(id).team; if (t in n) n[t]++; });
+    const R = Engine.ring(state), need = R.length ? Engine.setupFor(R.length) : null;
+    const short = need ? ['townsfolk', 'outsider', 'minion'].filter(t => n[t] < need[t]).map(t => `${need[t]} ${TEAM_LABEL[t]}`) : [];
+    const warn = [];
+    if (d.ids.length < 5) warn.push('A script needs at least 5 characters.');
+    if (d.ids.length && !n.demon) warn.push('This script has no Demon yet.');
+    if (short.length) warn.push(`${R.length} players need at least ${short.join(', ')}.`);
+    return `<div class="dist"><div><b class="team-townsfolk">${n.townsfolk}</b>Townsfolk</div><div><b class="team-outsider">${n.outsider}</b>Outsiders</div>
+      <div><b class="team-minion">${n.minion}</b>Minions</div><div><b class="team-demon">${n.demon}</b>Demons</div></div>
+      ${warn.length ? `<div class="tip warn" style="margin-top:8px">${esc(warn.join(' '))}</div>` : ''}`;
+  }
+  function filterScriptGrid() {
+    const d = scriptDraft, q = normName(d.q), grid = $('#sc-grid'); if (!grid) return;
+    grid.querySelectorAll('.pick').forEach((b) => { b.hidden = (!!q && !b.dataset.search.includes(q)) || (d.only && !d.ids.includes(b.dataset.char)); });
+    let any = false;
+    grid.querySelectorAll('.sc-team').forEach((g) => { const on = !!g.querySelector('.pick:not([hidden])'); g.hidden = !on; any = any || on; });
+    $('#sc-none').hidden = any;
+  }
+  function sheetScript() {
+    const d = scriptDraft;
+    const pool = builderPool().map(id => draftInfo(id));
+    const homebrew = d.ids.filter(isHomebrew).map(draftInfo);
+    const cell = (c) => {
+      const on = d.ids.includes(c.id);
+      return `<button type="button" class="pick ${on ? 'on' : ''}" data-act="sc-toggle" data-char="${esc(c.id)}" data-search="${esc(normName(c.name))}" aria-pressed="${on}">
+        <span class="pk-ico">${icon(c.id, c)}</span><span class="pk-nm team-${c.team}">${esc(c.name)}</span></button>`;
+    };
+    const grid = TEAMS.filter(t => t !== 'fabled' && pool.some(c => c.team === t)).map(t => `<div class="sc-team"><h3 class="team-${t}">${TEAM_LABEL[t]}</h3><div class="pick-grid">${pool.filter(c => c.team === t).map(cell).join('')}</div></div>`).join('');
+    openSheet(`<div class="grab"></div><button type="button" class="btn small close" data-act="script-close">Cancel</button>
+      <h2>${d.editing ? 'Edit script' : 'New script'}</h2>
+      <div class="stack">
+        <div><label class="field" for="sc-name">Script name</label>
+          <input type="text" id="sc-name" maxlength="80" value="${esc(d.name)}" placeholder="What is this script called?" autocomplete="off" data-input="sc-name"></div>
+        <div id="sc-counts">${scriptCountsHtml()}</div>
+        <details class="rule" ${d.paste ? 'open' : ''}><summary>Paste script JSON</summary>
+          <label class="field" for="sc-paste" style="margin-top:8px">Script tool JSON</label>
+          <textarea id="sc-paste" data-input="sc-paste" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder='[{"id":"_meta","name":"My Script"},"washerwoman","imp"]'>${esc(d.paste)}</textarea>
+          <button type="button" class="btn small" data-act="sc-paste" style="margin-top:8px">Fill in from JSON</button>
+        </details>
+        <div>
+          <h3>Homebrew characters</h3>
+          ${homebrew.length ? `<ul class="sc-hb">${homebrew.map(c => `<li><span class="pf-ico">${icon(c.id, c)}</span><span class="grow"><b class="team-${c.team}">${esc(c.name)}</b><br><span class="faint">${esc(c.ability || 'No ability text')}</span></span>
+            <button type="button" class="btn small" data-act="sc-hb-edit" data-char="${esc(c.id)}" aria-label="Edit ${esc(c.name)}">Edit</button>
+            <button type="button" class="btn icon danger" data-act="sc-hb-del" data-char="${esc(c.id)}" aria-label="Remove ${esc(c.name)}">✕</button></li>`).join('')}</ul>` : ''}
+          <details class="rule" ${d.hb.id || d.hb.name || d.hb.ability ? 'open' : ''}><summary>${d.hb.id ? 'Edit homebrew character' : 'Add a homebrew character'}</summary>
+            <label class="field" for="sc-hb-name" style="margin-top:8px">Name</label>
+            <input type="text" id="sc-hb-name" maxlength="60" value="${esc(d.hb.name)}" autocomplete="off" data-input="sc-hb-name">
+            <label class="field" for="sc-hb-team" style="margin-top:8px">Team</label>
+            <select id="sc-hb-team" data-input="sc-hb-team">${TEAMS.filter(t => t !== 'fabled').map(t => `<option value="${t}" ${d.hb.team === t ? 'selected' : ''}>${TEAM_LABEL[t]}</option>`).join('')}</select>
+            <label class="field" for="sc-hb-ability" style="margin-top:8px">Ability</label>
+            <textarea id="sc-hb-ability" maxlength="500" data-input="sc-hb-ability">${esc(d.hb.ability)}</textarea>
+            <button type="button" class="btn small primary" data-act="sc-hb-save" style="margin-top:8px">${d.hb.id ? 'Update character' : 'Add character'}</button>
+          </details>
+        </div>
+        <div>
+          <div class="row between"><h3>Characters</h3>
+            <button type="button" class="chip-btn ${d.only ? 'on' : ''}" data-act="sc-only">On script only</button></div>
+          <input type="text" class="search" id="sc-q" value="${esc(d.q)}" placeholder="Search characters…" aria-label="Search characters to add" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" data-input="sc-q">
+          <div id="sc-grid">${grid}</div>
+          <p class="faint" id="sc-none" hidden>No characters match.</p>
+        </div>
+        <div class="row">
+          <button type="button" class="btn primary" data-act="sc-save">Save and use</button>
+          <button type="button" class="btn" data-act="sc-export">Export JSON</button>
+          ${d.libId ? '<button type="button" class="btn danger" data-act="sc-delete">Delete</button>' : ''}
+        </div>
+      </div>`);
+    filterScriptGrid();
+  }
+  function scriptAction(act, el) {
+    const d = scriptDraft; if (!d) return;
+    if (act === 'script-close') requestCloseSheet();
+    else if (act === 'sc-toggle') {
+      const id = el.dataset.char, on = !d.ids.includes(id);
+      d.ids = on ? [...d.ids, id] : d.ids.filter(x => x !== id); d.dirty = true;
+      if (on && !CHARACTERS[id] && extraByNorm[id] && !d.custom[id]) { const { name, team, ability } = extraByNorm[id]; d.custom[id] = { name, team, ability }; }
+      el.classList.toggle('on', on); el.setAttribute('aria-pressed', String(on));
+      $('#sc-counts').innerHTML = scriptCountsHtml(); filterScriptGrid();
+    } else if (act === 'sc-only') { d.only = !d.only; el.classList.toggle('on', d.only); el.setAttribute('aria-pressed', String(d.only)); filterScriptGrid(); }
+    else if (act === 'sc-paste') {
+      let parsed;
+      try { parsed = parseCustomScript(JSON.parse(d.paste)); }
+      catch (err) { toast('Could not read that JSON: ' + (err && err.message || 'unreadable'), false, 4000); return; }
+      if (d.ids.length && !confirm('Replace the characters on this script with the pasted ones?')) return;
+      d.ids = [...new Set(parsed.characters)]; d.custom = parsed.custom; d.paste = ''; d.dirty = true;
+      if (parsed.name !== 'Custom script' || !d.name.trim()) d.name = parsed.name;
+      d.hb = blankHomebrew(); sheetScript(); toast(`Filled in ${d.ids.length} characters`);
+    } else if (act === 'sc-hb-edit') {
+      const c = draftInfo(el.dataset.char); d.hb = { id: c.id, name: c.name, team: c.team, ability: c.ability || '' }; sheetScript();
+      const f = $('#sc-hb-name'); if (f) f.focus();
+    } else if (act === 'sc-hb-del') {
+      const id = el.dataset.char;
+      d.ids = d.ids.filter(x => x !== id); delete d.custom[id]; d.dirty = true;
+      if (d.hb.id === id) d.hb = blankHomebrew();
+      sheetScript();
+    } else if (act === 'sc-hb-save') {
+      const h = d.hb, name = h.name.trim(), n = normName(name);
+      if (!name) { toast('Give the character a name.', false, 3200); $('#sc-hb-name').focus(); return; }
+      if (builderPool().some(id => normName(draftInfo(id).name) === n)) { toast(`${name} is already in the list. Pick it under Characters.`, false, 4000); return; }
+      if (d.ids.some(id => id !== h.id && isHomebrew(id) && normName(draftInfo(id).name) === n)) { toast(`${name} is already on this script.`, false, 3200); return; }
+      let id = h.id;
+      if (!id) {
+        id = Engine.safeId(n) && !CHARACTERS[n] && !extraByNorm[n] && !d.custom[n] ? n : 'hb' + uid();
+        d.ids.push(id);
+      }
+      d.custom[id] = { name, team: h.team, ability: h.ability.trim() };
+      d.hb = blankHomebrew(); d.dirty = true; sheetScript(); toast(`${name} is on the script`);
+    } else if (act === 'sc-export') {
+      const name = d.name.trim() || 'Custom script';
+      const out = [{ id: '_meta', name }, ...d.ids.map(id => (d.custom[id] ? { id, ...d.custom[id] } : id))];
+      download(`${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom-script'}.json`, JSON.stringify(out, null, 1));
+    } else if (act === 'sc-delete') {
+      if (!confirm(`Delete ${d.name || 'this script'} from your saved scripts? A game using it keeps its own copy.`)) return;
+      writeLibrary(readLibrary().filter(x => x.libId !== d.libId));
+      if (state.customScript && state.customScript.libId === d.libId) { const { libId: _gone, ...rest } = state.customScript; state.customScript = rest; }
+      save(); closeSheet(); toast(libraryOk ? 'Script deleted' : 'This device could not update your saved scripts.', false, 3200);
+    } else if (act === 'sc-save') {
+      const name = d.name.trim();
+      if (!name) { toast('Give the script a name.', false, 3200); $('#sc-name').focus(); return; }
+      if (d.ids.length < 5) { toast('A script needs at least 5 characters.', false, 3200); return; }
+      const entry = storeScript({ id: 'custom', ...(d.libId ? { libId: d.libId } : {}), name, characters: d.ids, custom: d.custom });
+      useCustom(entry, !d.editing);
+      save(); closeSheet();
+      toast(libraryOk ? `${entry.name} is ready` : `${entry.name} is in this game, but this device could not keep it for later.`, false, libraryOk ? 2400 : 5000);
+    }
   }
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -1265,6 +1471,15 @@
       case 'align': state.myAlign = el.dataset.v; commit(); break;
       case 'known-evil': state.knownEvil = state.knownEvil.includes(pid) ? state.knownEvil.filter(x => x !== pid) : [...state.knownEvil, pid]; commit(); break;
       case 'import-script': $('#script-file').click(); break;
+      case 'script-new': openScriptDraft({ name: '', characters: [], custom: {} }, null, false); break;
+      case 'script-edit': {
+        const cur = state.scriptId === 'custom' ? state.customScript : null;
+        if (cur) { const src = library.find(x => x.libId === cur.libId) || cur; openScriptDraft(src, src.libId || null, true); }
+        else { const base = script(); openScriptDraft({ name: `${base.name} (copy)`, characters: base.characters, custom: {} }, null, false); }
+        break;
+      }
+      case 'script-close': case 'sc-toggle': case 'sc-only': case 'sc-paste': case 'sc-hb-edit': case 'sc-hb-del': case 'sc-hb-save': case 'sc-export': case 'sc-delete': case 'sc-save':
+        scriptAction(act, el); break;
       case 'export': download(`clocktower-game-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(state, null, 1)); break;
       case 'import-game': $('#game-file').click(); break;
       case 'new-game': {
@@ -1444,7 +1659,11 @@
     const el = e.target;
     const ch = el.dataset.change;
     if (el.dataset.input === 'pname') { render(); }
-    else if (ch === 'script') { state.scriptId = el.value; commit(); }
+    else if (ch === 'script') {
+      if (el.value.startsWith('lib:')) { const sc = library.find(x => x.libId === el.value.slice(4)); if (sc) useCustom(sc); }
+      else state.scriptId = el.value;
+      commit();
+    }
     else if (ch === 'me') {
       state.meId = el.value || null;
       state.bluff.plan = state.bluff.plan.map(x => ({ ...x, player: state.meId || x.player, targets: x.targets.filter(t => t !== state.meId) }));
@@ -1478,7 +1697,11 @@
         dry = true;
         try { state.customScript = sc; state.scriptId = 'custom'; render(); }
         catch (err) { state.customScript = prevScript; state.scriptId = prevId; dry = false; analysisKeyMemo = null; render(); throw err; }
-        dry = false; commit(); toast(`Loaded ${sc.name}`);
+        dry = false;
+        state.customScript = prevScript; archiveCurrent(null);
+        const entry = storeScript(sc);
+        state.customScript = withLeftovers(entry);
+        commit(); toast(libraryOk ? `Loaded ${entry.name}` : `Loaded ${entry.name}, but this device could not keep it for later.`, false, libraryOk ? 0 : 5000);
       }).catch(err => toast('Could not read that script: ' + (err && err.message || 'unreadable file'), false, 4000))
         .finally(() => { el.value = ''; }); // so the same file can be chosen again
     }
@@ -1514,6 +1737,13 @@
       const inp = document.querySelector('[data-input="guide-filter"]'); inp.focus(); inp.setSelectionRange(pos, pos);
     }
     else if (el.dataset.input === 'picker-q' && pickerState) { pickerState.q = el.value; $('#picker-list').innerHTML = pickerListHtml(); }
+    else if (el.dataset.input && el.dataset.input.startsWith('sc-') && scriptDraft) {
+      const d = scriptDraft, k = el.dataset.input;
+      if (k === 'sc-q') { d.q = el.value; filterScriptGrid(); }
+      else if (k === 'sc-paste') { d.paste = el.value; d.dirty = true; }
+      else if (k === 'sc-name') { d.name = el.value; d.dirty = true; }
+      else { d.hb[{ 'sc-hb-name': 'name', 'sc-hb-team': 'team', 'sc-hb-ability': 'ability' }[k]] = el.value; d.dirty = true; }
+    }
     else if (el.dataset.draft === 'text' && draft) draft.text = el.value;
     else if (el.dataset.note === 'text' && noteDraft) noteDraft.text = el.value;
   });

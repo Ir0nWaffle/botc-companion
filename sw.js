@@ -1,6 +1,6 @@
 // Offline cache. Games happen in basements with no signal, so the app must open without a network and must not hang
 // on a weak one: the network gets a short head start, then the cached copy is used while the network keeps trying.
-const CACHE = 'clocktower-companion-v8';
+const CACHE = 'clocktower-companion-v9';
 // Every file the app loads. tests/test_app.py checks this list against index.html, the manifest and the files that are really requested.
 const FILES = ['./', 'index.html', 'css/app.css', 'js/icons.js', 'js/extra-characters.js', 'js/data.js', 'js/coach.js', 'js/engine.js', 'js/app.js', 'manifest.webmanifest', 'icons/icon.svg',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png'];

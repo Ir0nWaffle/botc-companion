@@ -232,7 +232,7 @@ def run(browser, T):
     # real service worker: install, take control, then go offline
     page.evaluate("navigator.serviceWorker.ready.then(() => true)"); page.reload(); page.wait_for_function("navigator.serviceWorker.controller !== null")
     cached = page.evaluate("caches.keys().then(async ks => ({ keys: ks, files: (await (await caches.open(ks[0])).keys()).map(r => new URL(r.url).pathname) }))")
-    check(cached['keys'] == ['clocktower-companion-v8'], f'one cache, named for this version ({cached["keys"]})')
+    check(cached['keys'] == ['clocktower-companion-v9'], f'one cache, named for this version ({cached["keys"]})')
     check(all(('/' + f.lstrip('./') if f != './' else '/') in cached['files'] for f in files), 'the install cached every file in the list')
     page.evaluate("([k]) => localStorage.setItem(k, JSON.stringify({v: 3, scriptId: 'trouble-brewing', players: [{id: 'a', name: 'Offline Olive', claims: []}], tab: 'setup'}))", [KEY])
     ctx.set_offline(True)
@@ -248,7 +248,7 @@ def run(browser, T):
     r = page.evaluate("""async (src) => {
       const origin = location.origin, now = () => performance.now(), out = {};
       const make = (netFn, opts = {}) => {
-        const handlers = {}, store = new Map(), names = new Set(opts.names || ['clocktower-companion-v8']), deleted = [];
+        const handlers = {}, store = new Map(), names = new Set(opts.names || ['clocktower-companion-v9']), deleted = [];
         const entry = (k) => (typeof k === 'string' ? k : k.url).split('?')[0];
         const cacheObj = { put: async (k, v) => { if (opts.putFails) throw new Error('quota'); store.set(entry(k), v); }, match: async (k) => { const v = store.get(entry(k)); return v ? v.clone() : undefined; },
           addAll: async (rs) => { out.addAll = rs.map(r => [r.url, r.cache]); } };
@@ -290,7 +290,7 @@ def run(browser, T):
         const t = await w.dispatch(nav('/index.html')); await t.done; out.portalPage = await text(t.res); out.portalPageStore = await w.store.get(origin + '/index.html').text(); })());
       // install: fresh copies, all or nothing; activate: only older versions of this app go
       jobs.push((async () => { const w = make(async () => ok('x')); const waits = []; w.handlers.install({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.install = out.addAll; })());
-      jobs.push((async () => { const w = make(async () => ok('x'), { names: ['clocktower-companion-v7', 'clocktower-companion-v8', 'clocktower-companion-v6', 'someone-else'] }); const waits = []; w.handlers.activate({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.deleted = w.deleted.sort(); })());
+      jobs.push((async () => { const w = make(async () => ok('x'), { names: ['clocktower-companion-v7', 'clocktower-companion-v9', 'clocktower-companion-v6', 'someone-else'] }); const waits = []; w.handlers.activate({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.deleted = w.deleted.sort(); })());
       await Promise.all(jobs);
       return out;
     }""", sw_src)
@@ -342,6 +342,56 @@ def run(browser, T):
     ctx.close()
     ctx, page, errs = fresh(); load(page, game())
     check(page.evaluate("(k) => Object.keys(localStorage).filter(x => x.startsWith(k + '-')).length", KEY) == 0 and page.locator('.toast').count() == 0 and len(S(page)['players']) == 8, 'a healthy saved game loads with no backup and no message')
+    ctx.close()
+
+    # custom script builder: build, reuse, edit, paste, delete
+    ctx, page, errs = fresh(); load(page, game(), 'setup'); answers = []
+    page.on('dialog', lambda d: d.accept() if (answers.pop(0) if answers else True) else d.dismiss())
+    LIB = "JSON.parse(localStorage.getItem('botc-companion-scripts') || '[]')"
+    page.click('[data-act="script-new"]')
+    page.click('[data-act="sc-save"]')
+    check(page.locator('#sheet:not([hidden])').count() == 1 and 'name' in page.inner_text('.toast'), 'builder: a script needs a name')
+    page.fill('#sc-name', 'Basement Brew')
+    for c in ['chef', 'empath', 'lilmonsta', 'saint']: page.click(f'#sc-grid .pick[data-char="{c}"]')
+    page.click('[data-act="sc-save"]')
+    check(page.locator('#sheet:not([hidden])').count() == 1 and 'at least 5' in page.inner_text('.toast'), 'builder: a script needs 5 characters')
+    page.click('summary:has-text("Add a homebrew character")')
+    page.fill('#sc-hb-name', 'Chef'); page.click('[data-act="sc-hb-save"]')
+    check('already in the list' in page.inner_text('.toast'), 'builder: a homebrew cannot shadow an official character')
+    page.fill('#sc-hb-name', 'Moon <img src=x onerror="window.__xss=9">Witch'); page.select_option('#sc-hb-team', 'minion'); page.fill('#sc-hb-ability', 'Each night, choose a player.')
+    page.click('[data-act="sc-hb-save"]')
+    answers.append(False); page.keyboard.press('Escape'); page.wait_for_timeout(60)
+    check(page.locator('#sheet:not([hidden])').count() == 1 and page.input_value('#sc-name') == 'Basement Brew', 'builder: declining the discard prompt keeps the draft')
+    page.click('[data-act="sc-save"]'); page.wait_for_selector('#sheet', state='hidden')
+    st = S(page); lib = page.evaluate(LIB); hb = [k for k, v in st['customScript']['custom'].items() if v['team'] == 'minion']
+    check(st['scriptId'] == 'custom' and st['customScript']['name'] == 'Basement Brew' and len(st['customScript']['characters']) == 5 and len(hb) == 1, 'builder: the new script becomes the game script')
+    check(len(lib) == 1 and lib[0]['libId'] == st['customScript']['libId'], 'builder: the script is saved to the library')
+    check('lilmonsta' in st['customScript']['characters'] and st['customScript']['custom']['lilmonsta']['team'] == 'demon', 'builder: extra characters use the same ids as imported scripts')
+    check(page.evaluate('window.__xss === undefined'), 'builder: homebrew text cannot run code')
+    page.click('#mychar-btn'); page.click(f'#picker .pick[data-char="{hb[0]}"]'); page.wait_for_selector('#picker', state='hidden')
+    check(S(page)['myAlign'] == 'evil', 'builder: a homebrew Minion works as your character')
+    page.click('[data-act="new-game"]'); page.select_option('#script-sel', 'trouble-brewing')
+    check(S(page)['scriptId'] == 'trouble-brewing', 'builder: can switch back to an official script')
+    page.reload(); page.click('[data-tab="setup"]'); page.select_option('#script-sel', 'lib:' + lib[0]['libId'])
+    check(S(page)['scriptId'] == 'custom' and S(page)['customScript']['name'] == 'Basement Brew', 'builder: the saved script is reusable after New game and a reload')
+    page.click('#mychar-btn'); page.click(f'#picker .pick[data-char="{hb[0]}"]'); page.wait_for_selector('#picker', state='hidden')
+    page.click('[data-act="script-edit"]'); page.click(f'[data-act="sc-hb-del"][data-char="{hb[0]}"]'); page.click('#sc-grid .pick[data-char="imp"]'); page.click('[data-act="sc-save"]'); page.wait_for_selector('#sheet', state='hidden')
+    st = S(page)
+    check(len(page.evaluate(LIB)) == 1 and hb[0] not in st['customScript']['characters'] and st['customScript']['custom'][hb[0]]['team'] == 'minion', 'builder: editing updates in place, and a character the game uses stays readable')
+    check(hb[0] not in page.evaluate(LIB)[0]['custom'], 'builder: the library drops the removed character')
+    page.click('[data-act="script-new"]'); page.click('summary:has-text("Paste script JSON")')
+    page.fill('#sc-paste', 'not json'); page.click('[data-act="sc-paste"]')
+    check('Could not read' in page.inner_text('.toast') and page.input_value('#sc-paste') == 'not json', 'builder: bad pasted JSON is reported and kept for fixing')
+    page.fill('#sc-paste', '[{"id":"_meta","name":"Pasted"},"washerwoman","fortune_teller","no_dashii","pit-hag",{"id":"zz_new","name":"Zed","team":"outsider","ability":"Odd."}]'); page.click('[data-act="sc-paste"]')
+    check(page.input_value('#sc-name') == 'Pasted' and page.locator('#sc-grid .pick.on').count() == 4 and page.locator('.sc-hb li').count() == 1, 'builder: pasted JSON fills in the draft')
+    page.click('[data-act="sc-save"]'); page.wait_for_selector('#sheet', state='hidden')
+    check(len(page.evaluate(LIB)) == 2 and S(page)['customScript']['name'] == 'Pasted', 'builder: a second script joins the library')
+    page.click('[data-act="script-edit"]'); page.click('[data-act="sc-delete"]'); page.wait_for_selector('#sheet', state='hidden')
+    check(len(page.evaluate(LIB)) == 1 and S(page)['customScript']['name'] == 'Pasted' and 'libId' not in S(page)['customScript'] and 'from this game' in page.inner_text('#script-sel'), 'builder: deleting a saved script leaves the current game intact')
+    page.set_viewport_size({'width': 360, 'height': 700}); page.click('[data-act="script-new"]'); page.wait_for_timeout(120)
+    check(page.evaluate("document.querySelector('#sheet').scrollWidth <= document.querySelector('#sheet').clientWidth"), 'builder: fits a phone with no sideways scroll')
+    page.screenshot(path=str(SHOTS / 'script-builder.png'))
+    check(not errs, f'builder: no console errors ({errs[:2]})')
     ctx.close()
 
     # imports that fail leave the game alone, and use the toast, not alert()

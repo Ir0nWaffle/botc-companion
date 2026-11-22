@@ -976,7 +976,7 @@ with sync_playwright() as pw:
 
     # Offline bundle and cache
     sw = page.evaluate("fetch('sw.js').then(r => r.text())")
-    check("clocktower-companion-v8" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the current cache')
+    check("clocktower-companion-v9" in sw and "js/coach.js" in sw, 'service worker caches coach.js under the current cache')
     check(page.evaluate("document.querySelector('script[src=\"js/coach.js\"]') !== null && [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/coach.js') < [...document.scripts].map(s => s.getAttribute('src')).indexOf('js/engine.js')"), 'coach.js loads before engine.js')
 
     # ── Endgame coaching follows the win condition ──

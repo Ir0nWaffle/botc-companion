@@ -866,6 +866,17 @@ const Engine = (() => {
   const safePhase = (ph) => ({ kind: ph && ph.kind === 'day' ? 'day' : 'night', n: safeNum(ph && ph.n, 1, 99, 1) });
   const safeIds = (list) => [...new Set((Array.isArray(list) ? list : []).map(safeId).filter(Boolean))];
 
+  // A custom script, from a game file or the saved script library.
+  function sanitizeScript(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const custom = {};
+    Object.entries(raw.custom || {}).forEach(([k, c]) => {
+      if (safeId(k) && c && typeof c === 'object') custom[k] = { name: safeText(c.name, 60) || k, team: TEAMS.includes(c.team) ? c.team : 'townsfolk', ability: safeText(c.ability, 500) };
+    });
+    const libId = safeId(raw.libId);
+    return { id: 'custom', ...(libId ? { libId } : {}), name: safeText(raw.name, 80) || 'Custom script', characters: safeIds(raw.characters), custom };
+  }
+
   function sanitizeGame(raw, base) {
     const s = raw && typeof raw === 'object' ? raw : {};
     const seen = new Set();
@@ -907,14 +918,7 @@ const Engine = (() => {
         return [{ id, player: seen.has(x.player) ? x.player : (seen.has(s.meId) ? s.meId : ''), when: safePhase(x.when), kind: ['did', 'learned', 'said'].includes(x.kind) ? x.kind : 'said',
           targets: safeIds(x.targets).filter(t => seen.has(t)), char: safeId(x.char) || '', text: safeText(x.text, 2000), story: 'public' }];
       }) };
-    let customScript = null;
-    if (s.customScript && typeof s.customScript === 'object') {
-      const custom = {};
-      Object.entries(s.customScript.custom || {}).forEach(([k, c]) => {
-        if (safeId(k) && c && typeof c === 'object') custom[k] = { name: safeText(c.name, 60) || k, team: TEAMS.includes(c.team) ? c.team : 'townsfolk', ability: safeText(c.ability, 500) };
-      });
-      customScript = { id: 'custom', name: safeText(s.customScript.name, 80) || 'Custom script', characters: safeIds(s.customScript.characters), custom };
-    }
+    const customScript = sanitizeScript(s.customScript);
     const hasScript = s.scriptId === 'custom' ? !!customScript : Object.prototype.hasOwnProperty.call(SCRIPTS, s.scriptId);
     const has = (id) => (seen.has(id) ? id : null);
     return { ...base, scriptId: hasScript ? s.scriptId : base.scriptId, customScript, players, meId: has(s.meId), myChar: safeId(s.myChar) || '',
@@ -923,5 +927,5 @@ const Engine = (() => {
       tab: ['setup', 'town', 'info', 'days', 'read', 'bluff', 'guide'].includes(s.tab) ? s.tab : base.tab };
   }
 
-  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, phaseRank, bluffOptions, bluffCheck, coachFor, evilCoachFor, coachNow, safeId, sanitizeGame };
+  return { charInfo, isEvilTeam, setupFor, evilCountFor, analyze, tips, bluffs, aliveCount, votesNeeded, phaseLabel, latestClaim, claimOf, ring, timeline, phaseRank, bluffOptions, bluffCheck, coachFor, evilCoachFor, coachNow, safeId, sanitizeScript, sanitizeGame };
 })();

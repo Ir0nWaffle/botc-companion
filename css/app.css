@@ -333,3 +333,9 @@ details.rule.flat { background: transparent; border: 0; padding: 0; margin: 0; }
 .basics { margin: 0 0 12px; padding-left: 20px; color: var(--text-dim); font-size: .92rem; }
 .basics li { margin: 8px 0; overflow-wrap: anywhere; }
 .basics b { color: var(--text); }
+
+/* Script builder */
+.pick[hidden], .sc-team[hidden] { display: none; }
+.sc-hb { list-style: none; margin: 0 0 10px; padding: 0; }
+.sc-hb li { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.sc-hb .grow { flex: 1 1 auto; min-width: 0; }

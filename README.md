@@ -10,7 +10,7 @@ A private player's notebook for **Blood on the Clocktower**, built for phones an
 - **Guide**: every character on the script with ability text, tips for playing it and spotting it, and the rules for new players.
 - **Undo** for every change, bounded and in memory only. **Save game to file / Load game file** for backups, and a warning if the browser cannot save.
 
-Includes Trouble Brewing, Bad Moon Rising and Sects & Violets. A custom script can be imported from the official script tool's JSON. Ability text follows the [official wiki](https://wiki.bloodontheclocktower.com/). Character icons are original artwork from the BotCStoryTeller grimoire app. This is an unofficial fan tool. *Blood on the Clocktower* is a game by The Pandemonium Institute.
+Includes Trouble Brewing, Bad Moon Rising and Sects & Violets. If someone brings another script, build it on the Setup tab: pick official characters, add homebrew ones, or paste or import the script tool's JSON. Custom scripts are saved on the device and stay available for later games. Ability text follows the [official wiki](https://wiki.bloodontheclocktower.com/). Character icons are original artwork from the BotCStoryTeller grimoire app. This is an unofficial fan tool. *Blood on the Clocktower* is a game by The Pandemonium Institute.
 
 ## Run it
 
