@@ -405,8 +405,11 @@ def run(browser, T):
                                    ('info', lambda: (page.click('[data-tab="info"]'), page.click('[data-act="new-ev"]')), '#sheet [data-act="save-draft"]'),
                                    ('nomination', lambda: (page.click('[data-tab="days"]'), page.click('[data-act="new-nom"]')), '#sheet [data-act="save-nom"]'),
                                    ('picker', lambda: (page.click('[data-tab="setup"]'), page.click('#mychar-btn')), None)]:
-            page.click('[data-tab="town"]'); opener(); page.wait_for_timeout(80)
+            page.click('[data-tab="town"]'); opener()
             layer = '#picker' if kind == 'picker' else '#sheet'
+            # While a drawer slides in, its contents are briefly past the edge, but the page itself must never scroll sideways.
+            if page.evaluate('document.documentElement.scrollWidth > innerWidth'): lay.append(f'{w}x{h} {kind}: page scrolls sideways while opening')
+            page.evaluate("(l) => Promise.all(document.querySelector(l).getAnimations().map(a => a.finished.catch(() => {})))", layer)
             if page.evaluate(OVER): lay.append(f'{w}x{h} {kind}: sideways scroll')
             if page.evaluate(HIT, f'{layer} .close') != 'ok': lay.append(f'{w}x{h} {kind}: Close not reachable at the top')
             page.evaluate("(l) => { const s = document.querySelector(l); s.scrollTop = s.scrollHeight; }", layer); page.wait_for_timeout(30)
