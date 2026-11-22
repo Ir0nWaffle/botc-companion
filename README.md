@@ -45,4 +45,9 @@ The suite serves the repo on a local port, drives the app in headless Chromium (
 
 ## Android APK
 
-`.github/workflows/android-apk.yml` wraps the app in a Capacitor Android shell (`android-shell/`) and builds an APK. Pushing a tag such as `v1.0.0` builds it and publishes a GitHub release with the APK attached; running the workflow by hand from the Actions tab gives the APK as a download. To sign with your own release key, add the repository secrets listed at the top of the workflow. Without them the APK is signed with a debug key.
+`.github/workflows/android-apk.yml` wraps the app in a Capacitor Android shell (`android-shell/`) and builds an APK. The APK bundles the app files, so it opens offline with no HTTPS address needed.
+
+- **Release:** push a tag such as `v1.0.0`. The workflow builds the APK and publishes a GitHub release with it attached.
+- **Test build:** run the workflow by hand from the Actions tab and leave `release_tag` empty. The APK is a download on the run page. Enter a tag such as `v1.0.0` in `release_tag` to create that tag and release instead.
+- **Install:** download the `.apk` on the phone, open it and allow installs from that source when asked.
+- **Signing:** to sign with your own release key, add the four `ANDROID_KEYSTORE_*` and `ANDROID_KEY_*` repository secrets listed at the top of the workflow, and keep the same key for every release. Without them the APK is signed with a debug key, which installs fine but cannot be updated in place by a build signed with a different key. Uninstalling deletes saved games, so use *Save game to file* first.
