@@ -30,6 +30,10 @@ Browsers only allow installing a web app and working offline from an **HTTPS** a
 
 Updates arrive by themselves the next time the app is opened with a signal. A slow connection is given about 2.5 seconds before the saved copy is used. Games are saved in the browser on that device; use *Save game to file* on the Setup tab for a copy you can move or keep.
 
+## Icons
+
+All icons are generated from the artwork in `branding/build_icons.py`. Run `python3 branding/build_icons.py` after changing it. Web icons go to `icons/`. Android launcher resources are in `branding/android/res/` (copy them into an APK project's `app/src/main/res/`), and store and link-preview images are in `branding/store/`.
+
 ## Tests
 
 ```bash

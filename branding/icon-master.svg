@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"><defs>
+  <radialGradient id="sky" cx="50%" cy="38%" r="75%"><stop offset="0" stop-color="#2A3552"/><stop offset=".58" stop-color="#141A2A"/><stop offset="1" stop-color="#090B10"/></radialGradient>
+  <radialGradient id="glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#F2B84B" stop-opacity=".30"/><stop offset="1" stop-color="#F2B84B" stop-opacity="0"/></radialGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFE3A3"/><stop offset=".48" stop-color="#F2B84B"/><stop offset="1" stop-color="#B97A22"/></linearGradient>
+  <linearGradient id="moon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFF3D2"/><stop offset="1" stop-color="#E9C77C"/></linearGradient>
+  <mask id="crescent"><rect width="1024" height="1024" fill="#000"/><circle cx="724" cy="282" r="84" fill="#fff"/><circle cx="692" cy="258" r="74" fill="#000"/></mask>
+</defs><clipPath id="r"><rect width="1024" height="1024" rx="228"/></clipPath><g clip-path="url(#r)"><rect width="1024" height="1024" fill="url(#sky)"/><circle cx="512" cy="498" r="340" fill="url(#glow)"/><g transform="translate(512 518) scale(1.0) translate(-512 -507)"><rect width="1024" height="1024" fill="url(#moon)" mask="url(#crescent)"/><path d="M504 112h16v44l66 198h44v30h-20v340l64 76v102H352V800l64-76V384h-20v-30h44l66-198z" fill="url(#gold)"/><path d="M396 354l20-64 20 64zM588 354l20-64 20 64z" fill="url(#gold)"/><path d="M416 650h192v16H416zM416 384h192v12H416z" fill="#0E1220" opacity=".55"/>
+      <path d="M470 902v-84a42 42 0 0 1 84 0v84z" fill="#0E1220"/><circle cx="512" cy="498" r="86" fill="#0E1220"/><circle cx="512" cy="498" r="86" fill="none" stroke="#FFE3A3" stroke-width="9"/>
+      <path d="M512 498V438M512 498l42 28" fill="none" stroke="#FFD27A" stroke-width="15" stroke-linecap="round"/><circle cx="512" cy="498" r="17" fill="#F0625D"/></g></g></svg>

@@ -232,7 +232,7 @@ def run(browser, T):
     # real service worker: install, take control, then go offline
     page.evaluate("navigator.serviceWorker.ready.then(() => true)"); page.reload(); page.wait_for_function("navigator.serviceWorker.controller !== null")
     cached = page.evaluate("caches.keys().then(async ks => ({ keys: ks, files: (await (await caches.open(ks[0])).keys()).map(r => new URL(r.url).pathname) }))")
-    check(cached['keys'] == ['clocktower-companion-v9'], f'one cache, named for this version ({cached["keys"]})')
+    check(cached['keys'] == ['clocktower-companion-v10'], f'one cache, named for this version ({cached["keys"]})')
     check(all(('/' + f.lstrip('./') if f != './' else '/') in cached['files'] for f in files), 'the install cached every file in the list')
     page.evaluate("([k]) => localStorage.setItem(k, JSON.stringify({v: 3, scriptId: 'trouble-brewing', players: [{id: 'a', name: 'Offline Olive', claims: []}], tab: 'setup'}))", [KEY])
     ctx.set_offline(True)
@@ -248,7 +248,7 @@ def run(browser, T):
     r = page.evaluate("""async (src) => {
       const origin = location.origin, now = () => performance.now(), out = {};
       const make = (netFn, opts = {}) => {
-        const handlers = {}, store = new Map(), names = new Set(opts.names || ['clocktower-companion-v9']), deleted = [];
+        const handlers = {}, store = new Map(), names = new Set(opts.names || ['clocktower-companion-v10']), deleted = [];
         const entry = (k) => (typeof k === 'string' ? k : k.url).split('?')[0];
         const cacheObj = { put: async (k, v) => { if (opts.putFails) throw new Error('quota'); store.set(entry(k), v); }, match: async (k) => { const v = store.get(entry(k)); return v ? v.clone() : undefined; },
           addAll: async (rs) => { out.addAll = rs.map(r => [r.url, r.cache]); } };
@@ -290,7 +290,7 @@ def run(browser, T):
         const t = await w.dispatch(nav('/index.html')); await t.done; out.portalPage = await text(t.res); out.portalPageStore = await w.store.get(origin + '/index.html').text(); })());
       // install: fresh copies, all or nothing; activate: only older versions of this app go
       jobs.push((async () => { const w = make(async () => ok('x')); const waits = []; w.handlers.install({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.install = out.addAll; })());
-      jobs.push((async () => { const w = make(async () => ok('x'), { names: ['clocktower-companion-v7', 'clocktower-companion-v9', 'clocktower-companion-v6', 'someone-else'] }); const waits = []; w.handlers.activate({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.deleted = w.deleted.sort(); })());
+      jobs.push((async () => { const w = make(async () => ok('x'), { names: ['clocktower-companion-v7', 'clocktower-companion-v10', 'clocktower-companion-v6', 'someone-else'] }); const waits = []; w.handlers.activate({ waitUntil: p => waits.push(p) }); await Promise.all(waits); out.deleted = w.deleted.sort(); })());
       await Promise.all(jobs);
       return out;
     }""", sw_src)
