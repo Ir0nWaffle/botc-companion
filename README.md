@@ -42,3 +42,7 @@ LAUNCH_ONLY=1 python3 tests/test_app.py  # only the launch checks (accessibility
 ```
 
 The suite serves the repo on a local port, drives the app in headless Chromium (including phone and tablet sizes), and writes screenshots to `tests/screens/` (ignored by git). It uses Chromium's device emulation only: it does not replace trying the app on real iOS and Android devices.
+
+## Android APK
+
+`.github/workflows/android-apk.yml` wraps the app in a Capacitor Android shell (`android-shell/`) and builds an APK. Pushing a tag such as `v1.0.0` builds it and publishes a GitHub release with the APK attached; running the workflow by hand from the Actions tab gives the APK as a download. To sign with your own release key, add the repository secrets listed at the top of the workflow. Without them the APK is signed with a debug key.

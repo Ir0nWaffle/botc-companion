@@ -1,0 +1,11 @@
+{
+  "appId": "app.clocktower.companion",
+  "appName": "Clocktower Companion",
+  "webDir": "www",
+  "backgroundColor": "#090B10",
+  "android": {
+    "backgroundColor": "#090B10",
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

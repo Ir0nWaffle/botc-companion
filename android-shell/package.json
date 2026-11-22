@@ -1,0 +1,10 @@
+{
+  "name": "clocktower-companion-android",
+  "private": true,
+  "description": "Wraps the web app in a Capacitor Android shell. Used only by .github/workflows/android-apk.yml.",
+  "devDependencies": {
+    "@capacitor/android": "7.4.2",
+    "@capacitor/cli": "7.4.2",
+    "@capacitor/core": "7.4.2"
+  }
+}
